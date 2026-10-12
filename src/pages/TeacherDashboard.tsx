@@ -21,7 +21,6 @@ import { useNavigate } from "react-router-dom";
 import Button from "../components/ui/Button";
 import Card from "../components/ui/Card";
 import PageHeader from "../components/ui/PageHeader";
-import StatCard from "../components/ui/StatCard";
 import { useSchool } from "../context/SchoolContext";
 import { supabase } from "../lib/supabase";
 
@@ -1048,7 +1047,9 @@ export default function TeacherDashboard() {
           <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
             <div>
               <div className="flex items-center gap-2">
-                <Users size={18} className="text-indigo-500" />
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-100 text-indigo-700">
+                  <Users size={18} />
+                </div>
                 <h2 className="text-sm font-semibold text-slate-900">
                   {sectionType === "creche" ? "Children under care" : "My Nursery children"}
                 </h2>
@@ -1139,7 +1140,9 @@ export default function TeacherDashboard() {
                 Nursery teachers can use early-years learning, observations, routines and child-development workflows.
               </p>
             </div>
-            <GraduationCap size={20} className="shrink-0 text-indigo-500" />
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-violet-100 text-violet-700">
+              <GraduationCap size={20} />
+            </div>
           </div>
 
           <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -1161,9 +1164,34 @@ export default function TeacherDashboard() {
       )}
 
       <div className="grid min-w-0 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        {statCards.map((stat) => (
-          <StatCard key={stat.label} {...stat} />
-        ))}
+        {statCards.map((stat) => {
+          const label = stat.label.toLowerCase();
+          const tone = label.includes("attendance")
+            ? { icon: "bg-emerald-100 text-emerald-700" }
+            : label.includes("class")
+              ? { icon: "bg-orange-100 text-orange-700" }
+              : label.includes("subject") || label.includes("student") || label.includes("children")
+                ? { icon: "bg-violet-100 text-violet-700" }
+                : { icon: "bg-sky-100 text-sky-700" };
+          const StatIcon = stat.icon;
+
+          return (
+            <div
+              key={stat.label}
+              className="min-w-0 rounded-xl border border-slate-200 bg-white p-5 shadow-sm"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className={`flex h-10 w-10 items-center justify-center rounded-xl ${tone.icon}`}>
+                  <StatIcon size={19} />
+                </div>
+              </div>
+              <p className="mt-5 text-2xl font-semibold tracking-tight text-slate-900">
+                {stat.value}
+              </p>
+              <p className="mt-1 text-sm text-slate-500">{stat.label}</p>
+            </div>
+          );
+        })}
       </div>
 
       {isEarlyYears && (
@@ -1301,7 +1329,9 @@ export default function TeacherDashboard() {
               <h2 className="text-sm font-semibold text-slate-900">Attendance today</h2>
               <p className="mt-1 text-sm text-slate-500">Attendance recorded for your assigned classes.</p>
             </div>
-            <ClipboardCheck size={20} className="shrink-0 text-indigo-500" />
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-100 text-emerald-700">
+              <ClipboardCheck size={20} />
+            </div>
           </div>
 
           <div className="mt-6 flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
@@ -1330,7 +1360,9 @@ export default function TeacherDashboard() {
               <h2 className="text-sm font-semibold text-slate-900">Recent assessments</h2>
               <p className="mt-1 text-sm text-slate-500">Assessments linked to your classes and subjects.</p>
             </div>
-            <BookOpen size={20} className="shrink-0 text-indigo-500" />
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-sky-100 text-sky-700">
+              <BookOpen size={20} />
+            </div>
           </div>
 
           <div className="mt-5 space-y-3">
@@ -1384,7 +1416,9 @@ export default function TeacherDashboard() {
               <h2 className="text-sm font-semibold text-slate-900">Upcoming timetable</h2>
               <p className="mt-1 text-sm text-slate-500">Other lessons from your current timetable.</p>
             </div>
-            <CalendarDays size={20} className="shrink-0 text-indigo-500" />
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-100 text-amber-700">
+              <CalendarDays size={20} />
+            </div>
           </div>
 
           <div className="mt-5 grid gap-3 sm:grid-cols-2">
@@ -1416,7 +1450,9 @@ export default function TeacherDashboard() {
               <h2 className="text-sm font-semibold text-slate-900">School announcements</h2>
               <p className="mt-1 text-sm text-slate-500">Latest messages from the school.</p>
             </div>
-            <Megaphone size={20} className="shrink-0 text-indigo-500" />
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-fuchsia-100 text-fuchsia-700">
+              <Megaphone size={20} />
+            </div>
           </div>
 
           <div className="mt-5 space-y-4">
@@ -1542,7 +1578,9 @@ export default function TeacherDashboard() {
 
                   <div className="rounded-xl border border-slate-200 p-4">
                     <div className="flex items-center gap-2">
-                      <Utensils size={17} className="text-indigo-500" />
+                      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-orange-100 text-orange-700">
+                        <Utensils size={17} />
+                      </div>
                       <h3 className="text-sm font-semibold text-slate-900">Meals & feeding</h3>
                     </div>
                     <div className="mt-4 grid gap-3 sm:grid-cols-3">
@@ -1561,7 +1599,9 @@ export default function TeacherDashboard() {
 
                   <div className="rounded-xl border border-slate-200 p-4">
                     <div className="flex items-center gap-2">
-                      <Moon size={17} className="text-indigo-500" />
+                      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-violet-100 text-violet-700">
+                        <Moon size={17} />
+                      </div>
                       <h3 className="text-sm font-semibold text-slate-900">Nap & rest</h3>
                     </div>
                     <div className="mt-4 grid gap-4 sm:grid-cols-3">

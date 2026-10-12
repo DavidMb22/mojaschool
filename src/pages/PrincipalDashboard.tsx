@@ -21,7 +21,6 @@ import { useNavigate } from "react-router-dom";
 import Button from "../components/ui/Button";
 import Card from "../components/ui/Card";
 import PageHeader from "../components/ui/PageHeader";
-import StatCard from "../components/ui/StatCard";
 import { supabase } from "../lib/supabase";
 import { getStudents } from "../lib/students";
 import { getClasses } from "../lib/classes";
@@ -339,7 +338,7 @@ function TrendChart({ points }: { points: AttendanceTrendPoint[] }) {
     .join(" ");
 
   return (
-    <div className="w-full overflow-hidden rounded-xl bg-slate-50 p-2 sm:p-3">
+    <div className="w-full overflow-hidden rounded-xl bg-violet-50/70 p-2 sm:p-3">
       <svg
         viewBox={`0 0 ${width} ${height}`}
         className="h-auto w-full"
@@ -379,7 +378,7 @@ function TrendChart({ points }: { points: AttendanceTrendPoint[] }) {
           strokeWidth="3"
           strokeLinecap="round"
           strokeLinejoin="round"
-          className="text-MojaSchoolr-600"
+          className="text-violet-600"
         />
 
         {pointCoordinates.map((point, index) => (
@@ -391,7 +390,7 @@ function TrendChart({ points }: { points: AttendanceTrendPoint[] }) {
               fill="white"
               stroke="currentColor"
               strokeWidth="3"
-              className="text-MojaSchoolr-600"
+              className="text-violet-600"
             />
             <text
               x={point.x}
@@ -426,7 +425,7 @@ function SectionMessage({
   if (status === "loading") {
     return (
       <div className="flex min-h-36 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-500">
-        <Loader2 size={17} className="animate-spin text-MojaSchoolr-600" />
+        <Loader2 size={17} className="animate-spin text-violet-600" />
         {loadingLabel}
       </div>
     );
@@ -502,7 +501,7 @@ function StatusBars({
                 </div>
                 <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-slate-100">
                   <div
-                    className="h-full rounded-full bg-MojaSchoolr-600 transition-all duration-500"
+                    className="h-full rounded-full bg-violet-600 transition-all duration-500"
                     style={{ width: `${Math.min(100, Math.max(0, percent))}%` }}
                   />
                 </div>
@@ -532,7 +531,7 @@ function CoverageRow({
       </div>
       <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
         <div
-          className="h-full rounded-full bg-MojaSchoolr-600 transition-all duration-500"
+          className="h-full rounded-full bg-violet-600 transition-all duration-500"
           style={{ width: `${Math.min(100, Math.max(0, percent))}%` }}
         />
       </div>
@@ -553,10 +552,10 @@ function ActionButton({
     <button
       type="button"
       onClick={onClick}
-      className="inline-flex min-h-10 items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-left text-sm font-medium text-slate-700 transition hover:border-MojaSchoolr-200 hover:bg-MojaSchoolr-50 hover:text-MojaSchoolr-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-MojaSchoolr-500 focus-visible:ring-offset-2"
+      className="inline-flex min-h-10 items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-left text-sm font-medium text-slate-700 transition hover:border-violet-200 hover:bg-violet-50 hover:text-violet-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-2"
     >
       <span className="inline-flex min-w-0 items-center gap-2">
-        <span className="text-MojaSchoolr-600">{icon}</span>
+        <span className="text-violet-600">{icon}</span>
         <span className="truncate">{label}</span>
       </span>
       <ArrowUpRight size={14} className="shrink-0 text-slate-400" />
@@ -1457,7 +1456,7 @@ export default function PrincipalDashboard() {
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <School size={18} className="shrink-0 text-MojaSchoolr-600" />
+              <School size={18} className="shrink-0 text-violet-600" />
               <h2 className="text-sm font-semibold text-slate-900">School sections</h2>
             </div>
             <p className="mt-1 text-sm text-slate-500">
@@ -1472,8 +1471,8 @@ export default function PrincipalDashboard() {
               className={[
                 "inline-flex min-h-9 items-center rounded-lg border px-3 py-2 text-xs font-semibold transition",
                 selectedSectionId === "all"
-                  ? "border-MojaSchoolr-600 bg-MojaSchoolr-600 text-white"
-                  : "border-slate-200 bg-white text-slate-600 hover:border-MojaSchoolr-200 hover:bg-MojaSchoolr-50 hover:text-MojaSchoolr-700",
+                  ? "border-violet-600 bg-violet-600 text-white"
+                  : "border-slate-200 bg-white text-slate-600 hover:border-violet-200 hover:bg-violet-50 hover:text-violet-700",
               ].join(" ")}
             >
               Overview
@@ -1486,8 +1485,8 @@ export default function PrincipalDashboard() {
                 className={[
                   "inline-flex min-h-9 items-center rounded-lg border px-3 py-2 text-xs font-semibold transition",
                   selectedSectionId === section.id
-                    ? "border-MojaSchoolr-600 bg-MojaSchoolr-600 text-white"
-                    : "border-slate-200 bg-white text-slate-600 hover:border-MojaSchoolr-200 hover:bg-MojaSchoolr-50 hover:text-MojaSchoolr-700",
+                    ? "border-violet-600 bg-violet-600 text-white"
+                    : "border-slate-200 bg-white text-slate-600 hover:border-violet-200 hover:bg-violet-50 hover:text-violet-700",
                 ].join(" ")}
               >
                 {section.name}
@@ -1497,9 +1496,9 @@ export default function PrincipalDashboard() {
         </div>
 
         {selectedSectionId !== "all" && (
-          <div className="mt-4 flex flex-col gap-3 rounded-xl border border-MojaSchoolr-100 bg-MojaSchoolr-50/50 p-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="mt-4 flex flex-col gap-3 rounded-xl border border-violet-100 bg-violet-50/50 p-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex min-w-0 items-center gap-3">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white text-MojaSchoolr-600 shadow-sm">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white text-violet-600 shadow-sm">
                 <GraduationCap size={17} />
               </div>
               <div className="min-w-0">
@@ -1542,9 +1541,35 @@ export default function PrincipalDashboard() {
       </Card>
 
       <div className="grid min-w-0 gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
-        {statCards.map((stat) => (
-          <StatCard key={stat.label} {...stat} />
-        ))}
+        {statCards.map((stat) => {
+          const label = stat.label.toLowerCase();
+          const tone = label.includes("attendance")
+            ? { card: "border-emerald-100 bg-emerald-50", icon: "bg-emerald-100 text-emerald-700" }
+            : label.includes("teacher") || label.includes("assessment")
+              ? { card: "border-sky-100 bg-sky-50", icon: "bg-sky-100 text-sky-700" }
+              : label.includes("class") || label.includes("admission")
+                ? { card: "border-orange-100 bg-orange-50", icon: "bg-orange-100 text-orange-700" }
+                : { card: "border-violet-100 bg-violet-50", icon: "bg-violet-100 text-violet-700" };
+          const StatIcon = stat.icon;
+
+          return (
+            <Card key={stat.label} className={`min-w-0 p-5 ${tone.card}`}>
+              <div className="flex items-start justify-between gap-3">
+                <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${tone.icon}`}>
+                  <StatIcon size={19} strokeWidth={1.8} />
+                </div>
+              </div>
+              <div className="mt-5">
+                <div className="text-2xl font-semibold tracking-tight text-slate-900">
+                  {stat.value}
+                </div>
+                <div className="mt-1 text-sm text-slate-500">
+                  {stat.label}
+                </div>
+              </div>
+            </Card>
+          );
+        })}
       </div>
 
       {!baseLoading && attentionItems.length > 0 && (
@@ -1572,15 +1597,15 @@ export default function PrincipalDashboard() {
                   key={item.id}
                   type="button"
                   onClick={item.onClick}
-                  className="group min-w-0 rounded-xl border border-amber-200 bg-white p-4 text-left transition hover:border-MojaSchoolr-300 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-MojaSchoolr-500 focus-visible:ring-offset-2"
+                  className="group min-w-0 rounded-xl border border-orange-200 bg-white p-4 text-left transition hover:border-violet-300 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-2"
                 >
                   <div className="flex items-start justify-between gap-3">
-                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-amber-100 text-amber-700">
+                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-orange-100 text-orange-700">
                       <Icon size={17} />
                     </div>
                     <ArrowUpRight
                       size={15}
-                      className="text-slate-300 transition group-hover:text-MojaSchoolr-600"
+                      className="text-slate-300 transition group-hover:text-violet-600"
                     />
                   </div>
 
@@ -1590,7 +1615,7 @@ export default function PrincipalDashboard() {
                   <p className="mt-1 break-words text-xs leading-5 text-slate-500">
                     {item.description}
                   </p>
-                  <span className="mt-3 inline-flex text-xs font-medium text-MojaSchoolr-600">
+                  <span className="mt-3 inline-flex text-xs font-medium text-violet-600">
                     {item.action}
                   </span>
                 </button>
@@ -1633,7 +1658,7 @@ export default function PrincipalDashboard() {
             <button
               type="button"
               onClick={() => navigate("/attendance")}
-              className="inline-flex shrink-0 items-center gap-1 self-start text-sm font-medium text-MojaSchoolr-600 hover:text-MojaSchoolr-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-MojaSchoolr-500 focus-visible:ring-offset-2"
+              className="inline-flex shrink-0 items-center gap-1 self-start text-sm font-medium text-violet-600 hover:text-violet-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-2"
             >
               Open attendance
               <ArrowUpRight size={14} />
@@ -1695,7 +1720,7 @@ export default function PrincipalDashboard() {
                     : "Class coverage for the current academic year."}
               </p>
             </div>
-            <UserRoundCheck size={20} className="shrink-0 text-MojaSchoolr-600" />
+            <UserRoundCheck size={20} className="shrink-0 text-sky-600" />
           </div>
 
           <div className="mt-6">
@@ -1750,7 +1775,7 @@ export default function PrincipalDashboard() {
               <h2 className="text-sm font-semibold text-slate-900">Academic oversight</h2>
               <p className="mt-1 text-sm text-slate-500">Assessment workload for the current academic year.</p>
             </div>
-            <BookOpen size={20} className="shrink-0 text-MojaSchoolr-600" />
+            <BookOpen size={20} className="shrink-0 text-sky-600" />
           </div>
 
           <div className="mt-6 grid grid-cols-3 gap-3">
@@ -1813,7 +1838,7 @@ export default function PrincipalDashboard() {
               <button
                 type="button"
                 onClick={() => navigate("/assessments")}
-                className="inline-flex items-center gap-1 text-xs font-medium text-MojaSchoolr-600 hover:text-MojaSchoolr-700"
+                className="inline-flex items-center gap-1 text-xs font-medium text-violet-600 hover:text-violet-700"
               >
                 View all
                 <ArrowUpRight size={13} />
@@ -1869,7 +1894,7 @@ export default function PrincipalDashboard() {
               <h2 className="text-sm font-semibold text-slate-900">School operations</h2>
               <p className="mt-1 text-sm text-slate-500">Admissions and day-to-day activity needing attention.</p>
             </div>
-            <School size={20} className="shrink-0 text-MojaSchoolr-600" />
+            <School size={20} className="shrink-0 text-orange-500" />
           </div>
 
           {sectionStatus.admissions !== "error" && (
@@ -1945,7 +1970,7 @@ export default function PrincipalDashboard() {
               <h2 className="text-sm font-semibold text-slate-900">Recent activity</h2>
               <p className="mt-1 text-sm text-slate-500">The latest updates visible to school leadership.</p>
             </div>
-            <UserCheck size={20} className="shrink-0 text-MojaSchoolr-600" />
+            <UserCheck size={20} className="shrink-0 text-violet-600" />
           </div>
 
           <div className="mt-5 space-y-4">
@@ -1957,7 +1982,7 @@ export default function PrincipalDashboard() {
             ) : activities.length > 0 ? (
               activities.map((activity) => (
                 <div key={activity.id} className="flex min-w-0 gap-3">
-                  <div className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-MojaSchoolr-600" />
+                  <div className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-violet-600" />
                   <div className="min-w-0">
                     <p className="break-words text-sm font-medium text-slate-900">{activity.title}</p>
                     <p className="mt-0.5 break-words text-xs text-slate-500">{activity.description}</p>
@@ -1979,7 +2004,7 @@ export default function PrincipalDashboard() {
               <h2 className="text-sm font-semibold text-slate-900">School notices</h2>
               <p className="mt-1 text-sm text-slate-500">Recent announcements for the school community.</p>
             </div>
-            <Megaphone size={20} className="shrink-0 text-MojaSchoolr-600" />
+            <Megaphone size={20} className="shrink-0 text-sky-600" />
           </div>
 
           <div className="mt-5 space-y-4">
@@ -1994,7 +2019,7 @@ export default function PrincipalDashboard() {
                   key={announcement.id}
                   type="button"
                   onClick={() => navigate("/announcements")}
-                  className="block w-full border-b border-slate-100 pb-4 text-left last:border-0 last:pb-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-MojaSchoolr-500 focus-visible:ring-offset-2"
+                  className="block w-full border-b border-slate-100 pb-4 text-left last:border-0 last:pb-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-2"
                 >
                   <p className="break-words text-sm font-medium text-slate-900">{announcement.title}</p>
                   <p className="mt-1 text-xs text-slate-400">{formatRelativeTime(announcement.createdAt)}</p>
@@ -2010,7 +2035,7 @@ export default function PrincipalDashboard() {
           <button
             type="button"
             onClick={() => navigate("/announcements")}
-            className="mt-5 inline-flex items-center gap-1 text-sm font-medium text-MojaSchoolr-600 hover:text-MojaSchoolr-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-MojaSchoolr-500 focus-visible:ring-offset-2"
+            className="mt-5 inline-flex items-center gap-1 text-sm font-medium text-violet-600 hover:text-violet-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-2"
           >
             Open announcements
             <ArrowUpRight size={14} />
@@ -2024,7 +2049,7 @@ export default function PrincipalDashboard() {
             <h2 className="text-sm font-semibold text-slate-900">Principal quick access</h2>
             <p className="mt-1 text-sm text-slate-500">Common areas for daily school leadership work.</p>
           </div>
-          <CheckCircle2 size={20} className="shrink-0 text-MojaSchoolr-600" />
+          <CheckCircle2 size={20} className="shrink-0 text-emerald-600" />
         </div>
 
         <div className="mt-5 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
