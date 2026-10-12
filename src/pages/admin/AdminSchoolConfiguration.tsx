@@ -103,6 +103,8 @@ interface SchoolConfiguration {
     secondary_color: string;
     portal_name: string | null;
     tagline: string | null;
+    principal_name: string | null;
+    principal_signature_path: string | null;
   };
 }
 
@@ -178,6 +180,8 @@ const DEFAULT_CONFIG: SchoolConfiguration = {
     secondary_color: "#0F172A",
     portal_name: null,
     tagline: null,
+    principal_name: null,
+    principal_signature_path: null,
   },
 };
 
@@ -197,6 +201,21 @@ const SECTION_PRESETS = [
   { key: "lower_secondary", name: "Lower Secondary", description: "Lower secondary / junior secondary education." },
   { key: "upper_secondary", name: "Upper Secondary", description: "Upper secondary / senior secondary education." },
 ];
+
+const TIMETABLED_SECTION_KEYS = new Set(["primary", "lower_secondary", "upper_secondary"]);
+
+function hasTimetabledAcademicSection(
+  sections: Array<{ key: string; enabled: boolean }> | null | undefined,
+): boolean {
+  return (sections ?? []).some((section) => {
+    const normalizedKey = section.key
+      .trim()
+      .toLowerCase()
+      .replace(/[èé]/g, "e")
+      .replace(/\s+/g, "_");
+    return section.enabled && TIMETABLED_SECTION_KEYS.has(normalizedKey);
+  });
+}
 
 const CURRICULA = [
   "General",
@@ -292,6 +311,7 @@ export default function AdminSchoolConfiguration() {
   const [saving, setSaving] = useState(false);
   const [approving, setApproving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [uploadingPrincipalSignature, setUploadingPrincipalSignature] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
@@ -544,6 +564,45 @@ export default function AdminSchoolConfiguration() {
     }));
   }
 
+  async function uploadPrincipalSignature(file: File) {
+    if (!school) return;
+
+    const allowedTypes = ["image/png", "image/jpeg", "image/webp"];
+    if (!allowedTypes.includes(file.type)) {
+      setError("Please upload a PNG, JPG or WebP signature image.");
+      return;
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      setError("The signature image must be 2 MB or smaller.");
+      return;
+    }
+
+    setUploadingPrincipalSignature(true);
+    setError("");
+    setSuccess("");
+    try {
+      const extension = file.type === "image/jpeg" ? "jpg" : file.type.split("/")[1];
+      const filePath = `${school.id}/principal/signature.${extension}`;
+      const { error: uploadError } = await supabase.storage
+        .from("teacher-signatures")
+        .upload(filePath, file, {
+          upsert: true,
+          contentType: file.type,
+          cacheControl: "3600",
+        });
+
+      if (uploadError) throw uploadError;
+
+      updateBranding("principal_signature_path", filePath);
+      setSuccess("Principal signature uploaded. Save configuration to apply it to report cards.");
+    } catch (uploadError) {
+      console.error("Failed to upload principal signature:", uploadError);
+      setError(uploadError instanceof Error ? uploadError.message : "Could not upload the principal signature.");
+    } finally {
+      setUploadingPrincipalSignature(false);
+    }
+  }
+
   function setSchoolType(value: string) {
     setConfig((current) => ({ ...current, school_type: value }));
   }
@@ -568,12 +627,37 @@ export default function AdminSchoolConfiguration() {
             },
           ];
 
-      return { ...current, sections: next };
+      const wasTimetableApplicable = hasTimetabledAcademicSection(current.sections);
+      const timetableApplicable = hasTimetabledAcademicSection(next);
+
+      return {
+        ...current,
+        sections: next,
+        enabled_modules: {
+          ...current.enabled_modules,
+          // Never carry a stale timetable-enabled flag from an early-years-only
+          // configuration when a Primary/Secondary section is added later.
+          // Also switch it off immediately if the last such section is removed.
+          timetable:
+            timetableApplicable && wasTimetableApplicable
+              ? current.enabled_modules.timetable
+              : false,
+        },
+      };
     });
   }
 
   async function saveConfiguration() {
     if (!school) return;
+
+    // Early-years-only schools do not use class-period timetables. Keep the
+    // timetable module disabled in saved configuration unless a Primary or
+    // Secondary section is enabled.
+    const timetableApplicable = hasTimetabledAcademicSection(config.sections);
+    const enabledModulesToSave = {
+      ...config.enabled_modules,
+      timetable: timetableApplicable ? config.enabled_modules.timetable : false,
+    };
 
     setSaving(true);
     setError("");
@@ -586,7 +670,7 @@ export default function AdminSchoolConfiguration() {
           p_school_id: school.id,
           p_school_type: config.school_type,
           p_curriculum: config.curriculum,
-          p_enabled_modules: config.enabled_modules,
+          p_enabled_modules: enabledModulesToSave,
           p_academic_settings: config.academic_settings,
           p_ai_settings: config.ai_settings,
           p_branding: config.branding,
@@ -607,6 +691,7 @@ export default function AdminSchoolConfiguration() {
         mergeConfig(
           {
             ...(data as Partial<SchoolConfiguration>),
+            enabled_modules: enabledModulesToSave,
             sections: sectionsData ?? config.sections,
           },
           school.id,
@@ -778,6 +863,7 @@ export default function AdminSchoolConfiguration() {
 
   const aiEnabled =
     config.ai_settings.enabled && config.enabled_modules.ai_assistant;
+  const timetableSettingsAvailable = hasTimetabledAcademicSection(config.sections);
 
   return (
     <div className="mx-auto w-full max-w-[1440px]">
@@ -826,7 +912,7 @@ export default function AdminSchoolConfiguration() {
           <button
             type="button"
             onClick={() => void load(true)}
-            disabled={refreshing || saving}
+            disabled={refreshing || saving || uploadingPrincipalSignature}
             className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-wiser-border bg-white px-4 text-sm font-semibold text-wiser-text-secondary shadow-sm hover:bg-slate-50 disabled:opacity-60"
           >
             <RefreshCw
@@ -839,12 +925,12 @@ export default function AdminSchoolConfiguration() {
           <button
             type="button"
             onClick={() => void saveConfiguration()}
-            disabled={saving}
+            disabled={saving || uploadingPrincipalSignature}
             className="inline-flex h-10 items-center justify-center gap-2 rounded-lg px-4 text-sm font-semibold text-white shadow-sm transition hover:brightness-95 disabled:cursor-not-allowed"
             style={{
-              backgroundColor: saving ? "#94a3b8" : "#4f46e5",
+              backgroundColor: saving || uploadingPrincipalSignature ? "#94a3b8" : "#4f46e5",
               color: "#ffffff",
-              opacity: saving ? 0.7 : 1,
+              opacity: saving || uploadingPrincipalSignature ? 0.7 : 1,
             }}
           >
             {saving ? (
@@ -958,28 +1044,33 @@ export default function AdminSchoolConfiguration() {
 
                     <div className="grid gap-3 md:grid-cols-2">
                       {group.modules.map((module) => {
-                        const enabled = Boolean(
-                          config.enabled_modules[module.key],
-                        );
+                        const timetableNotApplicable =
+                          module.key === "timetable" && !timetableSettingsAvailable;
+                        const enabled = timetableNotApplicable
+                          ? false
+                          : Boolean(config.enabled_modules[module.key]);
 
                         return (
                           <label
                             key={module.key}
                             className={[
-                              "flex cursor-pointer items-start gap-3 rounded-xl border p-4 text-left transition focus-within:ring-2 focus-within:ring-emerald-500 focus-within:ring-offset-2",
+                              "flex items-start gap-3 rounded-xl border p-4 text-left transition focus-within:ring-2 focus-within:ring-emerald-500 focus-within:ring-offset-2",
                               enabled
-                                ? "border-emerald-300 bg-emerald-50 ring-1 ring-emerald-100"
-                                : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50",
+                                ? "cursor-pointer border-emerald-300 bg-emerald-50 ring-1 ring-emerald-100"
+                                : timetableNotApplicable
+                                  ? "cursor-not-allowed border-slate-200 bg-slate-50 opacity-80"
+                                  : "cursor-pointer border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50",
                             ].join(" ")}
                           >
                             <input
                               type="checkbox"
                               checked={enabled}
+                              disabled={timetableNotApplicable}
                               onChange={(event) =>
                                 updateModule(module.key, event.currentTarget.checked)
                               }
                               aria-label={`Enable ${module.name}`}
-                              className="mt-0.5 h-5 w-5 shrink-0 cursor-pointer accent-emerald-600 focus-visible:outline-none"
+                              className="mt-0.5 h-5 w-5 shrink-0 cursor-pointer accent-emerald-600 focus-visible:outline-none disabled:cursor-not-allowed"
                               style={{ accentColor: "#16a34a" }}
                             />
 
@@ -993,7 +1084,9 @@ export default function AdminSchoolConfiguration() {
                                 )}
                               </span>
                               <span className="mt-1 block text-xs leading-5 text-slate-600">
-                                {module.description}
+                                {timetableNotApplicable
+                                  ? "Only available when Primary or a Secondary section is enabled."
+                                  : module.description}
                               </span>
                             </span>
                           </label>
@@ -1097,105 +1190,126 @@ export default function AdminSchoolConfiguration() {
                   </div>
                 </div>
 
-                <Field label="School days per week">
-                  <input
-                    type="number"
-                    min={1}
-                    max={7}
-                    value={config.academic_settings.school_days_per_week}
-                    onChange={(event) =>
-                      updateAcademic(
-                        "school_days_per_week",
-                        Number(event.target.value),
-                      )
-                    }
-                    className={inputClassName}
-                  />
-                </Field>
+                {timetableSettingsAvailable ? (
+                  <>
+                    <div className="md:col-span-2 rounded-xl border border-slate-200 bg-slate-50 p-4">
+                      <p className="text-sm font-semibold text-slate-900">
+                        Timetable and grading settings
+                      </p>
+                      <p className="mt-1 text-xs leading-5 text-slate-600">
+                        These defaults apply only to Primary and Secondary sections. Crèche and Nursery use daily care routines, learning activities and developmental observations rather than class-period timetables.
+                      </p>
+                    </div>
 
-                <Field label="Periods per day">
-                  <input
-                    type="number"
-                    min={1}
-                    max={20}
-                    value={config.academic_settings.periods_per_day}
-                    onChange={(event) =>
-                      updateAcademic(
-                        "periods_per_day",
-                        Number(event.target.value),
-                      )
-                    }
-                    className={inputClassName}
-                  />
-                </Field>
+                    <Field label="School days per week">
+                      <input
+                        type="number"
+                        min={1}
+                        max={7}
+                        value={config.academic_settings.school_days_per_week}
+                        onChange={(event) =>
+                          updateAcademic(
+                            "school_days_per_week",
+                            Number(event.target.value),
+                          )
+                        }
+                        className={inputClassName}
+                      />
+                    </Field>
 
-                <Field label="Lesson duration (minutes)">
-                  <input
-                    type="number"
-                    min={15}
-                    max={180}
-                    value={
-                      config.academic_settings.lesson_duration_minutes
-                    }
-                    onChange={(event) =>
-                      updateAcademic(
-                        "lesson_duration_minutes",
-                        Number(event.target.value),
-                      )
-                    }
-                    className={inputClassName}
-                  />
-                </Field>
+                    <Field label="Periods per day">
+                      <input
+                        type="number"
+                        min={1}
+                        max={20}
+                        value={config.academic_settings.periods_per_day}
+                        onChange={(event) =>
+                          updateAcademic(
+                            "periods_per_day",
+                            Number(event.target.value),
+                          )
+                        }
+                        className={inputClassName}
+                      />
+                    </Field>
 
-                <Field label="Break duration (minutes)">
-                  <input
-                    type="number"
-                    min={0}
-                    max={120}
-                    value={config.academic_settings.break_duration_minutes}
-                    onChange={(event) =>
-                      updateAcademic(
-                        "break_duration_minutes",
-                        Number(event.target.value),
-                      )
-                    }
-                    className={inputClassName}
-                  />
-                </Field>
+                    <Field label="Lesson duration (minutes)">
+                      <input
+                        type="number"
+                        min={15}
+                        max={180}
+                        value={config.academic_settings.lesson_duration_minutes}
+                        onChange={(event) =>
+                          updateAcademic(
+                            "lesson_duration_minutes",
+                            Number(event.target.value),
+                          )
+                        }
+                        className={inputClassName}
+                      />
+                    </Field>
 
-                <Field label="Grading system">
-                  <select
-                    value={config.academic_settings.grading_system}
-                    onChange={(event) =>
-                      updateAcademic("grading_system", event.target.value)
-                    }
-                    className={inputClassName}
-                  >
-                    <option value="percentage">Percentage</option>
-                    <option value="letter">Letter grades</option>
-                    <option value="points">Points</option>
-                    <option value="custom">Custom</option>
-                  </select>
-                </Field>
+                    <Field label="Break duration (minutes)">
+                      <input
+                        type="number"
+                        min={0}
+                        max={120}
+                        value={config.academic_settings.break_duration_minutes}
+                        onChange={(event) =>
+                          updateAcademic(
+                            "break_duration_minutes",
+                            Number(event.target.value),
+                          )
+                        }
+                        className={inputClassName}
+                      />
+                    </Field>
 
-                <Field label="Week starts on">
-                  <select
-                    value={config.academic_settings.week_starts_on}
-                    onChange={(event) =>
-                      updateAcademic("week_starts_on", event.target.value)
-                    }
-                    className={inputClassName}
-                  >
-                    <option value="Monday">Monday</option>
-                    <option value="Sunday">Sunday</option>
-                  </select>
-                </Field>
-              </div>
+                    <Field label="Grading system">
+                      <select
+                        value={config.academic_settings.grading_system}
+                        onChange={(event) =>
+                          updateAcademic("grading_system", event.target.value)
+                        }
+                        className={inputClassName}
+                      >
+                        <option value="percentage">Percentage</option>
+                        <option value="letter">Letter grades</option>
+                        <option value="points">Points</option>
+                        <option value="custom">Custom</option>
+                      </select>
+                    </Field>
 
-              <div className="border-t border-slate-200 bg-slate-50 px-5 py-4 text-xs leading-5 text-slate-600 sm:px-6">
-                Example: a school using 5 days × 8 periods has 40 timetable
-                slots per class each week. Weekly lesson requirements determine
-                how those slots are allocated.
+                    <Field label="Week starts on">
+                      <select
+                        value={config.academic_settings.week_starts_on}
+                        onChange={(event) =>
+                          updateAcademic("week_starts_on", event.target.value)
+                        }
+                        className={inputClassName}
+                      >
+                        <option value="Monday">Monday</option>
+                        <option value="Sunday">Sunday</option>
+                      </select>
+                    </Field>
+
+                    <div className="md:col-span-2 border-t border-slate-200 bg-slate-50 px-5 py-4 text-xs leading-5 text-slate-600 sm:px-6">
+                      Example: a Primary/Secondary school using 5 days × 8 periods has 40 timetable slots per class each week. Weekly lesson requirements determine how those slots are allocated.
+                    </div>
+                  </>
+                ) : (
+                  <div className="md:col-span-2 flex items-start gap-3 rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+                    <ShieldCheck size={18} className="mt-0.5 shrink-0 text-emerald-700" />
+                    <div>
+                      <p className="text-sm font-semibold text-emerald-900">
+                        Timetable settings are not applicable to Crèche and Nursery
+                      </p>
+                      <p className="mt-1 text-xs leading-5 text-emerald-800">
+                        No Primary or Secondary section is currently enabled. Early-years sections use daily attendance, care routines, meals, rest, activities and developmental observations instead of class periods, lesson durations, break durations or formal grading defaults. Enable Primary, Lower Secondary or Upper Secondary above to configure timetable and grading settings.
+                      </p>
+                    </div>
+                  </div>
+                )}
               </div>
             </section>
           )}
@@ -1422,6 +1536,61 @@ export default function AdminSchoolConfiguration() {
                     placeholder="A short school tagline"
                     className={inputClassName}
                   />
+                </Field>
+
+                <Field
+                  label="Principal name on report cards"
+                  description="This name is printed on this school's reports."
+                >
+                  <input
+                    value={config.branding.principal_name ?? ""}
+                    onChange={(event) =>
+                      updateBranding("principal_name", event.target.value || null)
+                    }
+                    placeholder="e.g. Jane Doe"
+                    className={inputClassName}
+                  />
+                </Field>
+
+                <Field
+                  label="Principal signature image"
+                  description="Upload a PNG, JPG or WebP image, up to 2 MB. The signature stays private to this school."
+                >
+                  <div className="space-y-2">
+                    <input
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp"
+                      disabled={uploadingPrincipalSignature || !school}
+                      onChange={(event) => {
+                        const file = event.currentTarget.files?.[0];
+                        event.currentTarget.value = "";
+                        if (file) void uploadPrincipalSignature(file);
+                      }}
+                      className={inputClassName}
+                    />
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs text-wiser-text-secondary">
+                        {config.branding.principal_signature_path
+                          ? "A principal signature is configured."
+                          : "No principal signature uploaded yet."}
+                      </span>
+                      {config.branding.principal_signature_path && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            updateBranding("principal_signature_path", null);
+                            setSuccess("Signature removal is pending. Save configuration to apply it.");
+                          }}
+                          className="text-xs font-semibold text-red-600 hover:text-red-700"
+                        >
+                          Clear signature
+                        </button>
+                      )}
+                    </div>
+                    {uploadingPrincipalSignature && (
+                      <p className="text-xs text-wiser-600">Uploading signature…</p>
+                    )}
+                  </div>
                 </Field>
 
                 <Field label="Primary colour">

@@ -26,6 +26,7 @@ interface SchoolClass {
   academic_section_id: string | null;
   capacity: number | null;
   is_active: boolean;
+  class_teacher_id: string | null;
 }
 
 interface AcademicSection {
@@ -59,6 +60,21 @@ interface ClassSubject {
   subject_id: string;
 }
 
+interface TeacherOption {
+  id: string;
+  first_name: string;
+  middle_name: string | null;
+  last_name: string;
+  email: string | null;
+  signature_path: string | null;
+}
+
+function teacherDisplayName(teacher: TeacherOption): string {
+  return [teacher.first_name, teacher.middle_name, teacher.last_name]
+    .filter(Boolean)
+    .join(" ");
+}
+
 type Tab = "classes" | "subjects";
 
 export default function ClassesSubjects() {
@@ -73,6 +89,7 @@ export default function ClassesSubjects() {
 
   const [classes, setClasses] = useState<SchoolClass[]>([]);
   const [teacherClassIds, setTeacherClassIds] = useState<string[]>([]);
+  const [teachers, setTeachers] = useState<TeacherOption[]>([]);
 
   const [academicYears, setAcademicYears] = useState<AcademicYear[]>([]);
 
@@ -88,7 +105,7 @@ export default function ClassesSubjects() {
 
   const [loading, setLoading] = useState(true);
 
-  const [, setError] = useState("");
+  const [pageError, setError] = useState("");
 
   const [search, setSearch] = useState("");
 
@@ -112,6 +129,7 @@ export default function ClassesSubjects() {
     if (!school) {
       setClasses([]);
       setTeacherClassIds([]);
+      setTeachers([]);
       setAcademicYears([]);
       setAcademicSections([]);
       setSubjects([]);
@@ -226,6 +244,7 @@ export default function ClassesSubjects() {
       setTeacherClassIds(assignedClassIds);
     } else {
       setTeacherClassIds([]);
+      setTeachers([]);
     }
 
     /*
@@ -243,7 +262,8 @@ export default function ClassesSubjects() {
         academic_year_id,
         academic_section_id,
         capacity,
-        is_active
+        is_active,
+        class_teacher_id
       `,
       )
       .eq("school_id", school.id)
@@ -376,6 +396,23 @@ export default function ClassesSubjects() {
       setLoading(false);
       return;
     }
+
+    let loadedTeacherOptions: TeacherOption[] = [];
+    if (!isTeacher) {
+      const { data: teacherData, error: teacherError } = await supabase
+        .from("teachers")
+        .select("id, first_name, middle_name, last_name, email, signature_path")
+        .eq("school_id", school.id)
+        .order("first_name", { ascending: true });
+
+      if (teacherError) {
+        console.error("Unable to load class-teacher options:", teacherError);
+        setError(`Classes loaded, but the class-teacher list could not be loaded: ${teacherError.message}`);
+      } else {
+        loadedTeacherOptions = (teacherData ?? []) as TeacherOption[];
+      }
+    }
+    setTeachers(loadedTeacherOptions);
 
     const loadedAcademicYears = (academicYearsResult.data ?? []).filter(
       (year) => !isTeacher || assignedYearIds.includes(year.id),
@@ -525,6 +562,11 @@ export default function ClassesSubjects() {
     );
   }, [subjects, search]);
 
+  const classTeacherNames = useMemo(
+    () => Object.fromEntries(teachers.map((teacher) => [teacher.id, teacherDisplayName(teacher)])),
+    [teachers],
+  );
+
   function openCreateClass() {
     if (isTeacher) return;
     setEditingClass(null);
@@ -666,6 +708,12 @@ export default function ClassesSubjects() {
           )}
         </div>
       </div>
+
+      {pageError && (
+        <div className="mb-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {pageError}
+        </div>
+      )}
 
       {isTeacher && (
         <div className="mb-5 rounded-xl border border-indigo-100 bg-indigo-50 px-4 py-3">
@@ -965,6 +1013,7 @@ export default function ClassesSubjects() {
             enrollmentCounts={enrollmentCounts}
             academicYears={academicYears}
             academicSections={academicSections}
+            classTeacherNames={classTeacherNames}
             onEdit={openEditClass}
             onToggle={toggleClassStatus}
             onSubjects={openClassSubjects}
@@ -988,6 +1037,7 @@ export default function ClassesSubjects() {
           schoolId={school?.id ?? ""}
           academicYears={academicYears}
           academicSections={academicSections}
+          teachers={teachers}
           selectedAcademicYearId={selectedAcademicYearId}
           editingClass={editingClass}
           onClose={() => setShowClassModal(false)}
@@ -1043,6 +1093,7 @@ function ClassesTable({
   enrollmentCounts,
   academicYears,
   academicSections,
+  classTeacherNames,
   onEdit,
   onToggle,
   onSubjects,
@@ -1054,6 +1105,7 @@ function ClassesTable({
   enrollmentCounts: Record<string, number>;
   academicYears: AcademicYear[];
   academicSections: AcademicSection[];
+  classTeacherNames: Record<string, string>;
   onEdit: (schoolClass: SchoolClass) => void;
   onToggle: (schoolClass: SchoolClass) => void;
   onSubjects: (schoolClass: SchoolClass) => void;
@@ -1075,11 +1127,15 @@ function ClassesTable({
 
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[820px]">
+      <table className="w-full min-w-[980px]">
         <thead>
           <tr className="border-b border-slate-200 bg-slate-50/70">
             <th className="px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-400">
               Class
+            </th>
+
+            <th className="px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+              Class teacher
             </th>
 
             <th className="px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-400">
@@ -1129,6 +1185,12 @@ function ClassesTable({
                     </div>
                   ) : null;
                 })()}
+              </td>
+
+              <td className="px-5 py-4 text-sm text-slate-600">
+                {schoolClass.class_teacher_id
+                  ? classTeacherNames[schoolClass.class_teacher_id] || "Assigned teacher"
+                  : "Not assigned"}
               </td>
 
               <td className="px-5 py-4 text-sm text-slate-600">
@@ -1354,6 +1416,7 @@ function ClassModal({
   schoolId,
   academicYears,
   academicSections,
+  teachers,
   selectedAcademicYearId,
   editingClass,
   onClose,
@@ -1362,6 +1425,7 @@ function ClassModal({
   schoolId: string;
   academicYears: AcademicYear[];
   academicSections: AcademicSection[];
+  teachers: TeacherOption[];
   selectedAcademicYearId: string;
   editingClass: SchoolClass | null;
   onClose: () => void;
@@ -1384,6 +1448,11 @@ function ClassModal({
   const [capacity, setCapacity] = useState(
     editingClass?.capacity?.toString() ?? "",
   );
+
+  const [classTeacherId, setClassTeacherId] = useState(
+    editingClass?.class_teacher_id ?? "",
+  );
+  const [signatureFile, setSignatureFile] = useState<File | null>(null);
 
   const [saving, setSaving] = useState(false);
 
@@ -1441,6 +1510,41 @@ function ClassModal({
       return;
     }
 
+    if (signatureFile && !classTeacherId) {
+      setError("Select a class teacher before uploading a signature.");
+      setSaving(false);
+      return;
+    }
+
+    if (signatureFile && classTeacherId) {
+      const signaturePath = `${schoolId}/${classTeacherId}/signature.${signatureFile.name.split(".").pop()?.toLowerCase() || "png"}`;
+      const { error: signatureUploadError } = await supabase.storage
+        .from("teacher-signatures")
+        .upload(signaturePath, signatureFile, {
+          upsert: true,
+          contentType: signatureFile.type,
+          cacheControl: "3600",
+        });
+
+      if (signatureUploadError) {
+        setError(`Signature upload failed: ${signatureUploadError.message}`);
+        setSaving(false);
+        return;
+      }
+
+      const { error: signatureRecordError } = await supabase
+        .from("teachers")
+        .update({ signature_path: signaturePath })
+        .eq("id", classTeacherId)
+        .eq("school_id", schoolId);
+
+      if (signatureRecordError) {
+        setError(`Signature file uploaded, but could not be linked to the teacher: ${signatureRecordError.message}`);
+        setSaving(false);
+        return;
+      }
+    }
+
     const payload = {
       name: finalClassName,
       section: selectedSection.name,
@@ -1448,6 +1552,7 @@ function ClassModal({
       academic_section_id: academicSectionId,
       academic_year: selectedYear?.name ?? null,
       capacity: numericCapacity,
+      class_teacher_id: classTeacherId || null,
       school_id: schoolId,
     };
 
@@ -1492,6 +1597,53 @@ function ClassModal({
           placeholder="e.g. Little Stars"
           required
         />
+
+        {/* Class teacher */}
+        <div>
+          <label className="mb-1.5 block text-sm font-medium text-slate-700">
+            Class teacher / Head teacher
+          </label>
+          <select
+            value={classTeacherId}
+            onChange={(event) => {
+              setClassTeacherId(event.target.value);
+              setSignatureFile(null);
+            }}
+            className="h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+          >
+            <option value="">Not assigned yet</option>
+            {teachers.map((teacher) => (
+              <option key={teacher.id} value={teacher.id}>
+                {teacherDisplayName(teacher)}{teacher.email ? ` — ${teacher.email}` : ""}
+              </option>
+            ))}
+          </select>
+          <p className="mt-1.5 text-xs text-slate-500">
+            This teacher's name will appear on the report card. You can optionally upload their saved signature image; otherwise, the printed report will include a blank signature line.
+          </p>
+          {classTeacherId && (
+            <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+              {teachers.find((teacher) => teacher.id === classTeacherId)?.signature_path && !signatureFile ? (
+                <p className="mb-2 text-xs font-medium text-emerald-700">A saved signature is available for this teacher.</p>
+              ) : null}
+              <label className="mb-1.5 block text-xs font-semibold text-slate-700">
+                {teachers.find((teacher) => teacher.id === classTeacherId)?.signature_path ? "Replace signature image (optional)" : "Upload signature image (optional)"}
+              </label>
+              <input
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                onChange={(event) => setSignatureFile(event.target.files?.[0] ?? null)}
+                className="block w-full text-xs text-slate-600 file:mr-3 file:rounded-md file:border-0 file:bg-white file:px-3 file:py-2 file:text-xs file:font-semibold file:text-slate-700"
+              />
+              <p className="mt-1.5 text-[11px] text-slate-500">PNG, JPG or WebP. Use a transparent background where possible.</p>
+            </div>
+          )}
+          {teachers.length === 0 && (
+            <p className="mt-1 text-xs text-amber-600">
+              No teacher profiles are available for this school yet. Add teachers first, or leave this unassigned and return later.
+            </p>
+          )}
+        </div>
 
         {/* Section + Academic Year */}
         <div className="grid gap-4 sm:grid-cols-2">

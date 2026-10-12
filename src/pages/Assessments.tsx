@@ -9,11 +9,13 @@ import {
   Pencil,
   Trash2,
   X,
+  Settings2,
 } from "lucide-react";
 
 import { supabase } from "../lib/supabase";
 import { useSchool } from "../context/SchoolContext";
 import { normalizeRole } from "../lib/permissions";
+import { loadActiveAssessmentScheme, loadAssessmentSchemeById, type AssessmentCategory, type AssessmentScheme } from "../lib/assessmentSchemes";
 
 type AcademicYear = {
   id: string;
@@ -60,6 +62,8 @@ type Assessment = {
   max_marks: number;
   status: "Draft" | "Published";
   created_at: string;
+  assessment_scheme_id?: string | null;
+  assessment_category_id?: string | null;
 };
 
 type TeacherAssignment = {
@@ -76,6 +80,8 @@ type FormState = {
   max_marks: string;
   subject_id: string;
   class_id: string;
+  assessment_scheme_id: string;
+  assessment_category_id: string;
 };
 
 const assessmentTypes = [
@@ -95,6 +101,8 @@ const emptyForm: FormState = {
   max_marks: "100",
   subject_id: "",
   class_id: "",
+  assessment_scheme_id: "",
+  assessment_category_id: "",
 };
 
 export default function Assessments() {
@@ -127,6 +135,9 @@ export default function Assessments() {
     useState<Assessment | null>(null);
 
   const [form, setForm] = useState<FormState>(emptyForm);
+  const [formScheme, setFormScheme] = useState<AssessmentScheme | null>(null);
+  const [formSchemeCategories, setFormSchemeCategories] = useState<AssessmentCategory[]>([]);
+  const [schemeLoading, setSchemeLoading] = useState(false);
 
   const [loading, setLoading] = useState(true);
   const [loadingAssessments, setLoadingAssessments] = useState(false);
@@ -539,6 +550,89 @@ export default function Assessments() {
     teacherAssignments,
   ]);
 
+  // The create/edit modal must derive its subjects from the class selected in
+  // that modal, not from the separate page-level class filter.
+  const modalAvailableSubjects = useMemo(() => {
+    if (!form.class_id) return [];
+    const subjectIds = new Set(
+      classSubjects
+        .filter((item) => item.class_id === form.class_id)
+        .map((item) => item.subject_id),
+    );
+    if (isTeacher) {
+      teacherAssignments
+        .filter((assignment) => assignment.class_id === form.class_id && assignment.academic_year_id === selectedAcademicYearId)
+        .forEach((assignment) => subjectIds.add(assignment.subject_id));
+    }
+    // For an administrator, a new class may not have its class_subjects rows
+    // configured yet. Show active school subjects rather than a blank select;
+    // the selected subject is linked to this class when the assessment saves.
+    if (!isTeacher && subjectIds.size === 0) return subjects;
+    return subjects.filter((subject) => subjectIds.has(subject.id));
+  }, [form.class_id, classSubjects, subjects, isTeacher, teacherAssignments, selectedAcademicYearId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadModalScheme() {
+      if (!showModal || !school?.id || !form.class_id || !selectedAcademicYearId) {
+        setFormScheme(null);
+        setFormSchemeCategories([]);
+        setSchemeLoading(false);
+        return;
+      }
+      setSchemeLoading(true);
+      try {
+        const selectedClass = classes.find((classItem) => classItem.id === form.class_id);
+        const shouldUseHistoricalScheme = Boolean(
+          editingAssessment?.assessment_scheme_id && form.class_id === editingAssessment.class_id,
+        );
+        const bundle = shouldUseHistoricalScheme
+          ? await loadAssessmentSchemeById(school.id, editingAssessment!.assessment_scheme_id!)
+          : await loadActiveAssessmentScheme(school.id, selectedAcademicYearId, selectedClass?.academic_section_id ?? null);
+        if (cancelled) return;
+        const configuredCategories = bundle.categories.filter((category) => category.enabled);
+        setFormScheme(bundle.scheme);
+        setFormSchemeCategories(configuredCategories);
+        if (configuredCategories.length > 0) {
+          setForm((current) => {
+            const chosen = configuredCategories.find((category) => category.id === current.assessment_category_id)
+              ?? (editingAssessment && form.class_id === editingAssessment.class_id
+                ? configuredCategories.find((category) => category.label.toLowerCase() === current.assessment_type.toLowerCase())
+                : undefined)
+              ?? (!editingAssessment ? configuredCategories[0] : undefined);
+            if (!chosen) return { ...current, assessment_scheme_id: bundle.scheme?.id ?? "" };
+            return {
+              ...current,
+              assessment_scheme_id: bundle.scheme?.id ?? chosen.scheme_id,
+              assessment_category_id: chosen.id,
+              assessment_type: chosen.label,
+              max_marks: String(chosen.max_marks),
+            };
+          });
+        } else {
+          setForm((current) => ({
+            ...current,
+            assessment_scheme_id: bundle.scheme?.id ?? "",
+            assessment_category_id: "",
+          }));
+        }
+      } catch (schemeError) {
+        // Keep the legacy options available when the scheme migration has not
+        // been applied yet; do not block the existing assessment workflow.
+        console.warn("Could not load assessment scheme for modal:", schemeError);
+        if (!cancelled) {
+          setFormScheme(null);
+          setFormSchemeCategories([]);
+          setForm((current) => ({ ...current, assessment_scheme_id: "", assessment_category_id: "" }));
+        }
+      } finally {
+        if (!cancelled) setSchemeLoading(false);
+      }
+    }
+    void loadModalScheme();
+    return () => { cancelled = true; };
+  }, [showModal, school?.id, form.class_id, selectedAcademicYearId, classes, editingAssessment]);
+
   /*
    * ----------------------------------------------------------
    * LOAD ASSESSMENTS
@@ -701,8 +795,12 @@ export default function Assessments() {
       ...emptyForm,
       class_id: selectedClassId,
       subject_id: selectedSubjectId,
+      assessment_scheme_id: "",
+      assessment_category_id: "",
     });
 
+    setFormScheme(null);
+    setFormSchemeCategories([]);
     setError("");
     setShowModal(true);
   }
@@ -727,8 +825,12 @@ export default function Assessments() {
       max_marks: String(assessment.max_marks),
       subject_id: assessment.subject_id,
       class_id: assessment.class_id,
+      assessment_scheme_id: assessment.assessment_scheme_id ?? "",
+      assessment_category_id: assessment.assessment_category_id ?? "",
     });
 
+    setFormScheme(null);
+    setFormSchemeCategories([]);
     setError("");
     setShowModal(true);
   }
@@ -782,6 +884,28 @@ export default function Assessments() {
 
     setSaving(true);
 
+    // Complete the class-subject link for administrator-created assessments in
+    // classes whose subject list has not yet been populated. Teachers remain
+    // restricted to existing teaching assignments.
+    const hasClassSubjectLink = classSubjects.some(
+      (item) => item.class_id === form.class_id && item.subject_id === form.subject_id,
+    );
+    if (!isTeacher && !hasClassSubjectLink) {
+      const { error: linkError } = await supabase.from("class_subjects").insert({
+        school_id: school.id,
+        class_id: form.class_id,
+        subject_id: form.subject_id,
+      });
+      if (linkError && !String(linkError.message).toLowerCase().includes("duplicate")) {
+        setError(`Could not link this subject to the class: ${linkError.message}`);
+        setSaving(false);
+        return;
+      }
+      setClassSubjects((current) => current.some(
+        (item) => item.class_id === form.class_id && item.subject_id === form.subject_id,
+      ) ? current : [...current, { class_id: form.class_id, subject_id: form.subject_id }]);
+    }
+
     const payload = {
       school_id: school.id,
       academic_year_id: selectedAcademicYearId,
@@ -791,6 +915,8 @@ export default function Assessments() {
       assessment_type: form.assessment_type,
       assessment_date: form.assessment_date,
       max_marks: maxMarks,
+      assessment_scheme_id: form.assessment_scheme_id || null,
+      assessment_category_id: form.assessment_category_id || null,
     };
 
     if (editingAssessment) {
@@ -825,6 +951,8 @@ export default function Assessments() {
     setShowModal(false);
     setEditingAssessment(null);
     setForm(emptyForm);
+    setFormScheme(null);
+    setFormSchemeCategories([]);
 
     await loadAssessments();
   }
@@ -948,15 +1076,27 @@ export default function Assessments() {
           </div>
         </div>
 
-        <button
-          type="button"
-          onClick={openCreateModal}
-          disabled={isTeacher && (!teacherAssignmentsLoaded || filteredClasses.length === 0)}
-          className="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          <Plus size={17} />
-          Create Assessment
-        </button>
+        <div className="flex flex-col gap-2 sm:flex-row">
+          {!isTeacher && (
+            <button
+              type="button"
+              onClick={() => navigate("/settings/assessment-schemes")}
+              className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50"
+            >
+              <Settings2 size={17} />
+              Assessment scheme
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={openCreateModal}
+            disabled={isTeacher && (!teacherAssignmentsLoaded || filteredClasses.length === 0)}
+            className="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Plus size={17} />
+            Create Assessment
+          </button>
+        </div>
       </div>
 
       {/* Error */}
@@ -1406,14 +1546,13 @@ export default function Assessments() {
                     >
                       <option value="">
                         {form.class_id
-                          ? "Select subject"
+                          ? modalAvailableSubjects.length > 0 ? "Select subject" : "No active subjects available"
                           : "Select class first"}
                       </option>
 
-                      {availableSubjects
+                      {modalAvailableSubjects
                         .filter((subject) => {
                           if (!isTeacher) return true;
-
                           return teacherAssignments.some(
                             (assignment) =>
                               assignment.academic_year_id === selectedAcademicYearId &&
@@ -1428,6 +1567,9 @@ export default function Assessments() {
                           </option>
                         ))}
                     </select>
+                    {form.class_id && !isTeacher && !classSubjects.some((item) => item.class_id === form.class_id) && modalAvailableSubjects.length > 0 && (
+                      <p className="mt-1.5 text-[11px] leading-4 text-amber-700">No subjects are linked to this class yet. Choosing a subject here will link it to the class.</p>
+                    )}
                   </div>
                 </div>
 
@@ -1440,21 +1582,47 @@ export default function Assessments() {
                     </label>
 
                     <select
-                      value={form.assessment_type}
-                      onChange={(event) =>
-                        setForm((current) => ({
-                          ...current,
-                          assessment_type: event.target.value,
-                        }))
-                      }
+                      value={form.assessment_category_id || `legacy:${form.assessment_type}`}
+                      onChange={(event) => {
+                        const optionValue = event.target.value;
+                        const category = formSchemeCategories.find((item) => item.id === optionValue);
+                        if (category) {
+                          setForm((current) => ({
+                            ...current,
+                            assessment_scheme_id: category.scheme_id,
+                            assessment_category_id: category.id,
+                            assessment_type: category.label,
+                            max_marks: String(category.max_marks),
+                          }));
+                        } else {
+                          const legacyType = optionValue.startsWith("legacy:") ? optionValue.slice(7) : optionValue;
+                          setForm((current) => ({
+                            ...current,
+                            assessment_scheme_id: "",
+                            assessment_category_id: "",
+                            assessment_type: legacyType,
+                          }));
+                        }
+                      }}
                       className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
                     >
-                      {assessmentTypes.map((type) => (
-                        <option key={type} value={type}>
-                          {type}
-                        </option>
-                      ))}
+                      {formSchemeCategories.length > 0 ? (
+                        formSchemeCategories.map((category) => (
+                          <option key={category.id} value={category.id}>
+                            {category.label} (/{category.max_marks})
+                          </option>
+                        ))
+                      ) : (
+                        assessmentTypes.map((type) => (
+                          <option key={type} value={`legacy:${type}`}>
+                            {type}
+                          </option>
+                        ))
+                      )}
                     </select>
+                    {schemeLoading && <p className="mt-1 text-[11px] text-slate-400">Loading this class's assessment scheme…</p>}
+                    {!schemeLoading && formScheme && formSchemeCategories.length > 0 && <p className="mt-1 text-[11px] text-slate-500">Using {formScheme.scheme_name}, version {formScheme.version_no}.</p>}
+                    {!schemeLoading && formSchemeCategories.length === 0 && !isTeacher && <p className="mt-1 text-[11px] text-slate-500">No custom scheme is configured for this scope; standard assessment types remain available.</p>}
                   </div>
 
                   {/* Maximum Marks */}

@@ -16,6 +16,15 @@ import {
 import { useSchool } from "../context/SchoolContext";
 import { getStudents } from "../lib/students";
 import { supabase } from "../lib/supabase";
+import {
+  loadActiveAssessmentScheme,
+  loadActiveReportCardTemplate,
+  type AssessmentCategory,
+  type AssessmentScheme,
+  type CalculationMethod,
+  type GradingBand,
+  type SchoolReportCardTemplate,
+} from "../lib/assessmentSchemes";
 
 import Avatar from "../components/ui/Avatar";
 import Badge from "../components/ui/Badge";
@@ -57,6 +66,8 @@ interface Assessment {
   class_id: string;
   academic_year_id: string;
   status: "Draft" | "Published";
+  assessment_scheme_id?: string | null;
+  assessment_category_id?: string | null;
 }
 
 interface Subject {
@@ -72,6 +83,12 @@ interface AssessmentResult {
   marks: number | null;
   grade: string | null;
   remarks: string | null;
+}
+
+interface ClassAssessmentResult {
+  assessment_id: string;
+  student_id: string;
+  marks: number | null;
 }
 
 interface Enrollment {
@@ -96,13 +113,169 @@ interface SubjectResult {
     percentage: number | null;
     grade: string;
     remarks: string | null;
+    categoryId: string | null;
+    categoryKey: string | null;
+    schemeId: string | null;
   }[];
   average: number | null;
+  classAverage: number | null;
   grade: string;
   teacherName: string;
 }
 
 type Term = "Term 1" | "Term 2" | "Term 3";
+
+type ReportCardTemplateKey =
+  | "high-gate-primary-v1"
+  | "high-gate-nursery-v1"
+  | "high-gate-auto-v1"
+  | "standard-v1";
+
+/**
+ * Report card templates are deliberately school-specific. High Gate is the
+ * only custom physical template configured in this release. A neutral
+ * standard template is used for other schools until their own design is
+ * provided and configured; High Gate branding must never leak across schools.
+ *
+ * In a future template-builder phase this resolver can read a stored template
+ * key from school configuration, without changing the report data pipeline.
+ */
+function normalizeSchoolIdentifier(value: string | null | undefined): string {
+  return (value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function resolveReportCardTemplateKey(
+  schoolName: string | null | undefined,
+  schoolSlug: string | null | undefined,
+  nursery: boolean,
+): ReportCardTemplateKey {
+  const identities = [
+    normalizeSchoolIdentifier(schoolSlug),
+    normalizeSchoolIdentifier(schoolName),
+  ];
+  const isHighGate = identities.some((identity) =>
+    /^(highgateinternationalacademy|highgateinternationalacademy[0-9]+|highgateinternational)$/.test(
+      identity,
+    ),
+  );
+
+  if (!isHighGate) return "standard-v1";
+  return nursery ? "high-gate-nursery-v1" : "high-gate-primary-v1";
+}
+
+function resolveConfiguredTemplateKey(
+  configuredKey: string | null | undefined,
+  schoolName: string | null | undefined,
+  schoolSlug: string | null | undefined,
+  nursery: boolean,
+): ReportCardTemplateKey {
+  // A stored template key must never allow another school to render High Gate
+  // branding, even if a configuration row is accidentally misassigned.
+  const isHighGate = [schoolSlug, schoolName].some((value) => {
+    const identity = normalizeSchoolIdentifier(value);
+    return /^(highgateinternationalacademy|highgateinternationalacademy[0-9]+|highgateinternational)$/.test(identity);
+  });
+  if (!isHighGate) return "standard-v1";
+
+  if (configuredKey === "high-gate-auto-v1") {
+    return nursery ? "high-gate-nursery-v1" : "high-gate-primary-v1";
+  }
+  if (configuredKey === "high-gate-primary-v1" || configuredKey === "high-gate-nursery-v1") {
+    return configuredKey;
+  }
+  if (configuredKey === "standard-v1") return "standard-v1";
+  return resolveReportCardTemplateKey(schoolName, schoolSlug, nursery);
+}
+
+/* =========================================================
+   CONFIGURABLE SCHOOL ASSESSMENT RULES
+========================================================= */
+
+function getConfiguredGrade(
+  percentage: number | null,
+  gradingScale: GradingBand[],
+): string {
+  if (percentage === null || Number.isNaN(percentage)) return "-";
+  const matchingBand = [...gradingScale]
+    .sort((a, b) => a.display_order - b.display_order)
+    .find((band) => percentage >= Number(band.min_percentage) && percentage <= Number(band.max_percentage));
+  return matchingBand?.grade ?? getGrade(percentage);
+}
+
+function normalizedAssessmentKey(value: string | null | undefined): string {
+  return (value ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function calculateAverageFromScheme(
+  rows: SubjectResult["assessments"],
+  categories: AssessmentCategory[],
+  schemeId: string | null,
+  calculationMethod: CalculationMethod | null,
+): number | null {
+  const validRows = rows.filter((row) => row.percentage !== null);
+  if (validRows.length === 0) return null;
+  const scopedCategories = categories.filter((category) =>
+    category.enabled && category.contributes_to_total && (!schemeId || category.scheme_id === schemeId),
+  );
+  if (scopedCategories.length === 0 || !calculationMethod) {
+    return validRows.reduce((total, row) => total + Number(row.percentage), 0) / validRows.length;
+  }
+
+  const categoryScores = scopedCategories.map((category) => {
+    const matchingRows = validRows.filter((row) => {
+      if (row.categoryId) return row.categoryId === category.id;
+      return row.categoryKey === category.category_key ||
+        normalizedAssessmentKey(row.type) === normalizedAssessmentKey(category.label) ||
+        normalizedAssessmentKey(row.type) === normalizedAssessmentKey(category.category_key);
+    });
+    if (matchingRows.length === 0) return null;
+    const percentage = matchingRows.reduce((total, row) => total + Number(row.percentage), 0) / matchingRows.length;
+    return { category, percentage };
+  }).filter((item): item is { category: AssessmentCategory; percentage: number } => item !== null);
+
+  // A required component with no mark means the final term score is not yet
+  // complete. Avoid presenting a misleading 100% based on CAT I alone.
+  const missingRequiredCategory = scopedCategories.some((category) => {
+    if (!category.is_required) return false;
+    return !validRows.some((row) => {
+      if (row.categoryId) return row.categoryId === category.id;
+      return row.categoryKey === category.category_key ||
+        normalizedAssessmentKey(row.type) === normalizedAssessmentKey(category.label) ||
+        normalizedAssessmentKey(row.type) === normalizedAssessmentKey(category.category_key);
+    });
+  });
+  if (missingRequiredCategory) return null;
+
+  if (categoryScores.length === 0) {
+    return validRows.reduce((total, row) => total + Number(row.percentage), 0) / validRows.length;
+  }
+
+  if (calculationMethod === "total_to_percentage") {
+    const denominator = categoryScores.reduce((total, item) => total + Number(item.category.max_marks), 0);
+    if (denominator <= 0) return null;
+    const earnedEquivalent = categoryScores.reduce(
+      (total, item) => total + (item.percentage / 100) * Number(item.category.max_marks),
+      0,
+    );
+    return (earnedEquivalent / denominator) * 100;
+  }
+
+  if (calculationMethod === "weighted_average") {
+    const weightedRows = categoryScores.filter((item) => Number(item.category.weight_percent ?? 0) > 0);
+    const totalWeight = weightedRows.reduce((total, item) => total + Number(item.category.weight_percent ?? 0), 0);
+    if (totalWeight <= 0) return null;
+    return weightedRows.reduce(
+      (total, item) => total + item.percentage * Number(item.category.weight_percent ?? 0),
+      0,
+    ) / totalWeight;
+  }
+
+  return categoryScores.reduce((total, item) => total + item.percentage, 0) / categoryScores.length;
+}
 
 /* =========================================================
    GRADING
@@ -282,11 +455,26 @@ export default function StudentResults() {
     AssessmentResult[]
   >([]);
 
+  const [classAssessmentResults, setClassAssessmentResults] = useState<
+    ClassAssessmentResult[]
+  >([]);
+
   const [selectedEnrollment, setSelectedEnrollment] =
     useState<Enrollment | null>(null);
 
   const [selectedSectionName, setSelectedSectionName] =
     useState("");
+  const [classTeacherName, setClassTeacherName] = useState("");
+  const [classTeacherSignaturePath, setClassTeacherSignaturePath] = useState("");
+  const [classTeacherSignatureUrl, setClassTeacherSignatureUrl] = useState("");
+  const [principalName, setPrincipalName] = useState("");
+  const [principalSignatureUrl, setPrincipalSignatureUrl] = useState("");
+  const [activeAssessmentScheme, setActiveAssessmentScheme] = useState<AssessmentScheme | null>(null);
+  const [reportAssessmentCategories, setReportAssessmentCategories] = useState<AssessmentCategory[]>([]);
+  const [gradingScale, setGradingScale] = useState<GradingBand[]>([]);
+  const [gradingScalesBySchemeId, setGradingScalesBySchemeId] = useState<Record<string, GradingBand[]>>({});
+  const [schemeMethodsById, setSchemeMethodsById] = useState<Record<string, CalculationMethod>>({});
+  const [databaseReportTemplate, setDatabaseReportTemplate] = useState<SchoolReportCardTemplate | null>(null);
 
   const [loading, setLoading] = useState(true);
 
@@ -455,10 +643,20 @@ export default function StudentResults() {
     if (!school || !selectedStudent || !selectedAcademicYearId) {
       setSelectedEnrollment(null);
       setSelectedSectionName("");
+      setClassTeacherName("");
+      setClassTeacherSignaturePath("");
+      setClassTeacherSignatureUrl("");
       setAssessments([]);
       setSubjects([]);
       setTeacherNames({});
       setAssessmentResults([]);
+      setClassAssessmentResults([]);
+      setActiveAssessmentScheme(null);
+      setReportAssessmentCategories([]);
+      setGradingScale([]);
+      setGradingScalesBySchemeId({});
+      setSchemeMethodsById({});
+      setDatabaseReportTemplate(null);
       return;
     }
 
@@ -473,6 +671,17 @@ export default function StudentResults() {
       try {
         setLoadingResults(true);
         setError("");
+        setClassTeacherName("");
+        setClassTeacherSignaturePath("");
+        setClassTeacherSignatureUrl("");
+        setAssessmentResults([]);
+        setClassAssessmentResults([]);
+        setActiveAssessmentScheme(null);
+        setReportAssessmentCategories([]);
+        setGradingScale([]);
+        setGradingScalesBySchemeId({});
+        setSchemeMethodsById({});
+        setDatabaseReportTemplate(null);
 
         /* -----------------------------------------------
            ENROLLMENT
@@ -507,10 +716,20 @@ export default function StudentResults() {
 
         if (!enrollment) {
           setSelectedSectionName("");
+          setClassTeacherName("");
+          setClassTeacherSignaturePath("");
+          setClassTeacherSignatureUrl("");
           setAssessments([]);
           setSubjects([]);
           setTeacherNames({});
           setAssessmentResults([]);
+          setClassAssessmentResults([]);
+          setActiveAssessmentScheme(null);
+          setReportAssessmentCategories([]);
+          setGradingScale([]);
+          setGradingScalesBySchemeId({});
+          setSchemeMethodsById({});
+          setDatabaseReportTemplate(null);
           return;
         }
 
@@ -524,7 +743,7 @@ export default function StudentResults() {
         const { data: classData, error: classError } =
           await supabase
             .from("classes")
-            .select("id, academic_section_id")
+            .select("id, academic_section_id, class_teacher_id")
             .eq("school_id", schoolId)
             .eq("id", enrollment.class_id)
             .maybeSingle();
@@ -534,6 +753,28 @@ export default function StudentResults() {
         }
 
         let sectionName = "";
+        let resolvedClassTeacherName = "";
+        let resolvedClassTeacherSignaturePath = "";
+
+        if (classData?.class_teacher_id) {
+          const { data: classTeacherData, error: classTeacherError } =
+            await supabase
+              .from("teachers")
+              .select("id, first_name, middle_name, last_name, signature_path")
+              .eq("school_id", schoolId)
+              .eq("id", classData.class_teacher_id)
+              .maybeSingle();
+
+          if (classTeacherError) throw classTeacherError;
+          if (classTeacherData) {
+            resolvedClassTeacherName = [
+              classTeacherData.first_name,
+              classTeacherData.middle_name,
+              classTeacherData.last_name,
+            ].filter(Boolean).join(" ");
+            resolvedClassTeacherSignaturePath = classTeacherData.signature_path ?? "";
+          }
+        }
 
         if (classData?.academic_section_id) {
           const { data: sectionData, error: sectionError } =
@@ -553,6 +794,44 @@ export default function StudentResults() {
         if (cancelled) return;
 
         setSelectedSectionName(sectionName);
+        setClassTeacherName(resolvedClassTeacherName);
+        setClassTeacherSignaturePath(resolvedClassTeacherSignaturePath);
+        setClassTeacherSignatureUrl("");
+
+        // Load the scheme and report template scoped to this school's class,
+        // section and academic year. Configuration failures fall back to the
+        // legacy behaviour instead of blocking student results.
+        let activeBundle: {
+          scheme: AssessmentScheme | null;
+          categories: AssessmentCategory[];
+          grades: GradingBand[];
+        } = { scheme: null, categories: [], grades: [] };
+        try {
+          activeBundle = await loadActiveAssessmentScheme(
+            schoolId,
+            academicYearId,
+            classData?.academic_section_id ?? null,
+          );
+        } catch (schemeError) {
+          console.warn("Assessment scheme is not available; using compatibility calculation:", schemeError);
+        }
+        let selectedTemplate: SchoolReportCardTemplate | null = null;
+        try {
+          selectedTemplate = await loadActiveReportCardTemplate(
+            schoolId,
+            academicYearId,
+            classData?.academic_section_id ?? null,
+          );
+        } catch (templateError) {
+          console.warn("Report-card template settings are not available; using the legacy template resolver:", templateError);
+        }
+        if (cancelled) return;
+        setActiveAssessmentScheme(activeBundle.scheme);
+        setReportAssessmentCategories(activeBundle.categories);
+        setGradingScale(activeBundle.grades);
+        setGradingScalesBySchemeId(activeBundle.scheme ? { [activeBundle.scheme.id]: activeBundle.grades } : {});
+        setSchemeMethodsById(activeBundle.scheme ? { [activeBundle.scheme.id]: activeBundle.scheme.calculation_method } : {});
+        setDatabaseReportTemplate(selectedTemplate);
 
         /* -----------------------------------------------
            TERM RANGE
@@ -565,6 +844,7 @@ export default function StudentResults() {
           setSubjects([]);
           setTeacherNames({});
           setAssessmentResults([]);
+          setClassAssessmentResults([]);
           return;
         }
 
@@ -584,7 +864,9 @@ export default function StudentResults() {
               subject_id,
               class_id,
               academic_year_id,
-              status
+              status,
+              assessment_scheme_id,
+              assessment_category_id
             `,
           )
           .eq("school_id", schoolId)
@@ -603,8 +885,64 @@ export default function StudentResults() {
 
         const loadedAssessments = (assessmentData as Assessment[]) ?? [];
 
-        if (cancelled) return;
+        // Fetch historical category rows for scheme versions already linked to
+        // assessments. New scheme versions must not silently reinterpret old
+        // marks when a school updates its setup mid-year.
+        const linkedSchemeIds = Array.from(new Set(
+          loadedAssessments.map((assessment) => assessment.assessment_scheme_id).filter((id): id is string => Boolean(id)),
+        ));
+        let allSchemeCategories = [...activeBundle.categories];
+        const allSchemeMethods: Record<string, CalculationMethod> = activeBundle.scheme
+          ? { [activeBundle.scheme.id]: activeBundle.scheme.calculation_method }
+          : {};
+        if (linkedSchemeIds.length > 0) {
+          const [
+            { data: historicalCategoryRows, error: historicalCategoryError },
+            { data: historicalSchemeRows, error: historicalSchemeError },
+            { data: historicalGradeRows, error: historicalGradeError },
+          ] = await Promise.all([
+            supabase.from("school_assessment_categories")
+              .select("id, scheme_id, category_key, label, max_marks, weight_percent, display_order, enabled, contributes_to_total, is_required")
+              .in("scheme_id", linkedSchemeIds)
+              .order("display_order", { ascending: true }),
+            supabase.from("school_assessment_schemes")
+              .select("id, calculation_method")
+              .eq("school_id", schoolId)
+              .in("id", linkedSchemeIds),
+            supabase.from("school_grading_scales")
+              .select("id, scheme_id, min_percentage, max_percentage, grade, description, display_order")
+              .in("scheme_id", linkedSchemeIds)
+              .order("display_order", { ascending: true }),
+          ]);
+          if (historicalCategoryError) console.warn("Unable to load historical assessment categories:", historicalCategoryError);
+          else {
+            const byId = new Map(allSchemeCategories.map((category) => [category.id, category]));
+            ((historicalCategoryRows ?? []) as AssessmentCategory[]).forEach((category) => byId.set(category.id, category));
+            allSchemeCategories = Array.from(byId.values());
+          }
+          if (historicalSchemeError) console.warn("Unable to load historical assessment schemes:", historicalSchemeError);
+          else ((historicalSchemeRows ?? []) as { id: string; calculation_method: CalculationMethod }[]).forEach((row) => {
+            allSchemeMethods[row.id] = row.calculation_method;
+          });
+          if (historicalGradeError) console.warn("Unable to load historical grading bands:", historicalGradeError);
+          else {
+            const byScheme = { ...(activeBundle.scheme ? { [activeBundle.scheme.id]: activeBundle.grades } : {}) } as Record<string, GradingBand[]>;
+            ((historicalGradeRows ?? []) as GradingBand[]).forEach((band) => {
+              byScheme[band.scheme_id] = [...(byScheme[band.scheme_id] ?? []), band];
+            });
+            Object.keys(byScheme).forEach((schemeId) => {
+              const unique = new Map(byScheme[schemeId].map((band) => [band.id, band]));
+              byScheme[schemeId] = Array.from(unique.values()).sort((a, b) => a.display_order - b.display_order);
+            });
+            setGradingScalesBySchemeId(byScheme);
+          }
+        } else {
+          setGradingScalesBySchemeId(activeBundle.scheme ? { [activeBundle.scheme.id]: activeBundle.grades } : {});
+        }
 
+        if (cancelled) return;
+        setReportAssessmentCategories(allSchemeCategories);
+        setSchemeMethodsById(allSchemeMethods);
         setAssessments(loadedAssessments);
 
         /* -----------------------------------------------
@@ -741,31 +1079,55 @@ export default function StudentResults() {
 
         if (assessmentIds.length === 0) {
           setAssessmentResults([]);
+          setClassAssessmentResults([]);
           return;
         }
 
-        const { data: resultData, error: resultError } = await supabase
-          .from("assessment_results")
-          .select(
-            `
-              id,
-              assessment_id,
-              student_id,
-              marks,
-              grade,
-              remarks
-            `,
-          )
-          .eq("student_id", student.id)
-          .in("assessment_id", assessmentIds);
+        const [studentResultsResponse, classResultsResponse] = await Promise.all([
+          supabase
+            .from("assessment_results")
+            .select(
+              `
+                id,
+                assessment_id,
+                student_id,
+                marks,
+                grade,
+                remarks
+              `,
+            )
+            .eq("student_id", student.id)
+            .in("assessment_id", assessmentIds),
+          // Class averages are supplementary to the student's own results.
+          // A permissions/policy issue here must not prevent the report card
+          // from loading; the CA cell will remain blank when unavailable.
+          supabase
+            .from("assessment_results")
+            .select("assessment_id, student_id, marks")
+            .in("assessment_id", assessmentIds),
+        ]);
 
-        if (resultError) {
-          throw resultError;
+        if (studentResultsResponse.error) {
+          throw studentResultsResponse.error;
         }
 
         if (cancelled) return;
 
-        setAssessmentResults((resultData as AssessmentResult[]) ?? []);
+        setAssessmentResults(
+          (studentResultsResponse.data as AssessmentResult[]) ?? [],
+        );
+
+        if (classResultsResponse.error) {
+          console.warn(
+            "Unable to load class-wide assessment averages:",
+            classResultsResponse.error,
+          );
+          setClassAssessmentResults([]);
+        } else {
+          setClassAssessmentResults(
+            (classResultsResponse.data as ClassAssessmentResult[]) ?? [],
+          );
+        }
       } catch (err) {
         console.error("Error loading student results:", err);
 
@@ -818,6 +1180,51 @@ export default function StudentResults() {
     });
 
     const grouped = new Map<string, Assessment[]>();
+    const assessmentById = new Map(
+      assessments.map((assessment) => [assessment.id, assessment]),
+    );
+    // Build a per-student set of subject rows so class average uses the same
+    // calculation scheme as each student's final subject result.
+    const classAssessmentRowsBySubject = new Map<
+      string,
+      Map<string, SubjectResult["assessments"]>
+    >();
+
+    classAssessmentResults.forEach((classResult) => {
+      const assessment = assessmentById.get(classResult.assessment_id);
+      if (!assessment) return;
+
+      const marks = classResult.marks === null ? null : Number(classResult.marks);
+      const percentage = getPercentage(marks, Number(assessment.max_marks));
+      const matchedCategory = (assessment.assessment_category_id
+        ? reportAssessmentCategories.find((category) => category.id === assessment.assessment_category_id)
+        : undefined) ?? reportAssessmentCategories.find((category) =>
+          (!assessment.assessment_scheme_id || category.scheme_id === assessment.assessment_scheme_id) &&
+          (normalizedAssessmentKey(assessment.assessment_type) === normalizedAssessmentKey(category.label) ||
+            normalizedAssessmentKey(assessment.assessment_type) === normalizedAssessmentKey(category.category_key)),
+        );
+      const schemeId = assessment.assessment_scheme_id ?? matchedCategory?.scheme_id ?? null;
+      const row: SubjectResult["assessments"][number] = {
+        id: assessment.id,
+        title: assessment.title,
+        type: matchedCategory?.label ?? getAssessmentTypeLabel(assessment.assessment_type),
+        date: assessment.assessment_date,
+        marks,
+        maxMarks: Number(assessment.max_marks),
+        percentage,
+        grade: getConfiguredGrade(percentage, schemeId ? gradingScalesBySchemeId[schemeId] ?? gradingScale : gradingScale),
+        remarks: null,
+        categoryId: assessment.assessment_category_id ?? matchedCategory?.id ?? null,
+        categoryKey: matchedCategory?.category_key ?? null,
+        schemeId,
+      };
+
+      const studentsForSubject = classAssessmentRowsBySubject.get(assessment.subject_id) ?? new Map<string, SubjectResult["assessments"]>();
+      const studentRows = studentsForSubject.get(classResult.student_id) ?? [];
+      studentRows.push(row);
+      studentsForSubject.set(classResult.student_id, studentRows);
+      classAssessmentRowsBySubject.set(assessment.subject_id, studentsForSubject);
+    });
 
     assessments.forEach((assessment) => {
       if (!grouped.has(assessment.subject_id)) {
@@ -843,28 +1250,72 @@ export default function StudentResults() {
 
           const percentage = getPercentage(marks, maxMarks);
 
+          const matchedCategory = (assessment.assessment_category_id
+            ? reportAssessmentCategories.find((category) => category.id === assessment.assessment_category_id)
+            : undefined) ?? reportAssessmentCategories.find((category) =>
+              (!assessment.assessment_scheme_id || category.scheme_id === assessment.assessment_scheme_id) &&
+              (normalizedAssessmentKey(assessment.assessment_type) === normalizedAssessmentKey(category.label) ||
+                normalizedAssessmentKey(assessment.assessment_type) === normalizedAssessmentKey(category.category_key)),
+            );
+          const assessmentSchemeId = assessment.assessment_scheme_id ?? matchedCategory?.scheme_id ?? null;
+          const assessmentGradingScale = assessmentSchemeId
+            ? gradingScalesBySchemeId[assessmentSchemeId] ?? gradingScale
+            : gradingScale;
+
           return {
             id: assessment.id,
             title: assessment.title,
-            type: getAssessmentTypeLabel(assessment.assessment_type),
+            type: matchedCategory?.label ?? getAssessmentTypeLabel(assessment.assessment_type),
             date: assessment.assessment_date,
             marks,
             maxMarks,
             percentage,
-            grade: getGrade(percentage),
+            grade: getConfiguredGrade(percentage, assessmentGradingScale),
             remarks: result?.remarks ?? null,
+            categoryId: assessment.assessment_category_id ?? matchedCategory?.id ?? null,
+            categoryKey: matchedCategory?.category_key ?? null,
+            schemeId: assessmentSchemeId,
           };
         });
 
-        const percentages = rows
-          .map((row) => row.percentage)
-          .filter((percentage): percentage is number => percentage !== null);
-
-        const average =
-          percentages.length > 0
-            ? percentages.reduce((total, percentage) => total + percentage, 0) /
-              percentages.length
+        const rowSchemeIds = Array.from(new Set(rows.map((row) => row.schemeId).filter((id): id is string => Boolean(id))));
+        const preferredSchemeId = rowSchemeIds.length === 1
+          ? rowSchemeIds[0]
+          : rowSchemeIds.length === 0
+            ? activeAssessmentScheme?.id ?? null
             : null;
+        const calculationMethod = preferredSchemeId
+          ? schemeMethodsById[preferredSchemeId] ?? activeAssessmentScheme?.calculation_method ?? null
+          : rowSchemeIds.length === 0 ? activeAssessmentScheme?.calculation_method ?? null : null;
+        const average = calculateAverageFromScheme(
+          rows,
+          reportAssessmentCategories,
+          preferredSchemeId,
+          calculationMethod,
+        );
+        const studentsWithSubjectScores = classAssessmentRowsBySubject.get(subjectId);
+        const classFinalScores: number[] = [];
+        studentsWithSubjectScores?.forEach((studentRows) => {
+          const ids = Array.from(new Set(studentRows.map((row) => row.schemeId).filter((id): id is string => Boolean(id))));
+          const studentSchemeId = ids.length === 1 ? ids[0] : ids.length === 0 ? activeAssessmentScheme?.id ?? null : null;
+          const studentCalculationMethod = studentSchemeId
+            ? schemeMethodsById[studentSchemeId] ?? activeAssessmentScheme?.calculation_method ?? null
+            : null;
+          const studentFinalScore = calculateAverageFromScheme(
+            studentRows,
+            reportAssessmentCategories,
+            studentSchemeId,
+            studentCalculationMethod,
+          );
+          if (studentFinalScore !== null) classFinalScores.push(studentFinalScore);
+        });
+        const classAverage = classFinalScores.length > 0
+          ? classFinalScores.reduce((total, percentage) => total + percentage, 0) / classFinalScores.length
+          : null;
+
+        const subjectSchemeIds = Array.from(new Set(rows.map((row) => row.schemeId).filter((id): id is string => Boolean(id))));
+        const subjectSchemeId = subjectSchemeIds.length === 1 ? subjectSchemeIds[0] : activeAssessmentScheme?.id ?? null;
+        const subjectGradingScale = subjectSchemeId ? (gradingScalesBySchemeId[subjectSchemeId] ?? gradingScale) : gradingScale;
 
         return {
           subjectId,
@@ -872,7 +1323,8 @@ export default function StudentResults() {
           subjectCode: subject?.code ?? null,
           assessments: rows,
           average,
-          grade: getGrade(average),
+          classAverage,
+          grade: getConfiguredGrade(average, subjectGradingScale),
           teacherName: teacherNames[subjectId] ?? "",
         };
       })
@@ -880,10 +1332,34 @@ export default function StudentResults() {
   }, [
     assessments,
     assessmentResults,
+    classAssessmentResults,
     subjects,
     selectedStudent,
     teacherNames,
+    reportAssessmentCategories,
+    activeAssessmentScheme,
+    schemeMethodsById,
+    gradingScale,
+    gradingScalesBySchemeId,
   ]);
+
+  const reportSchemeId = useMemo(() => {
+    const counts = new Map<string, number>();
+    subjectResults.forEach((subject) => subject.assessments.forEach((assessment) => {
+      if (assessment.schemeId) counts.set(assessment.schemeId, (counts.get(assessment.schemeId) ?? 0) + 1);
+    }));
+    const dominant = Array.from(counts.entries()).sort((a, b) => b[1] - a[1])[0]?.[0];
+    return dominant ?? activeAssessmentScheme?.id ?? null;
+  }, [subjectResults, activeAssessmentScheme]);
+
+  const reportGradingScale = useMemo(
+    () => reportSchemeId ? (gradingScalesBySchemeId[reportSchemeId] ?? gradingScale) : gradingScale,
+    [reportSchemeId, gradingScalesBySchemeId, gradingScale],
+  );
+
+  const reportCalculationMethod = reportSchemeId
+    ? schemeMethodsById[reportSchemeId] ?? activeAssessmentScheme?.calculation_method ?? null
+    : activeAssessmentScheme?.calculation_method ?? null;
 
   /* =======================================================
      SUMMARY
@@ -918,9 +1394,9 @@ export default function StudentResults() {
       totalAssessments,
       completedAssessments,
       overallAverage,
-      overallGrade: getGrade(overallAverage),
+      overallGrade: getConfiguredGrade(overallAverage, reportGradingScale),
     };
-  }, [subjectResults]);
+  }, [subjectResults, reportGradingScale]);
 
   const isNurseryStudent = useMemo(() => {
     const section = selectedSectionName.trim().toLowerCase();
@@ -949,6 +1425,56 @@ export default function StudentResults() {
       return;
     }
 
+    let signedClassTeacherSignatureUrl = "";
+    let resolvedPrincipalName = "";
+    let resolvedPrincipalSignatureUrl = "";
+
+    // Principal details are stored in the current school's configuration.
+    // If a school has not configured them yet, report printing still works.
+    if (school?.id) {
+      try {
+        const { data: schoolConfigData, error: schoolConfigError } = await supabase
+          .from("school_configurations")
+          .select("branding")
+          .eq("school_id", school.id)
+          .maybeSingle();
+
+        if (schoolConfigError) throw schoolConfigError;
+
+        const branding = schoolConfigData?.branding as Record<string, unknown> | null;
+        resolvedPrincipalName = typeof branding?.principal_name === "string"
+          ? branding.principal_name.trim()
+          : "";
+        const signaturePath = typeof branding?.principal_signature_path === "string"
+          ? branding.principal_signature_path
+          : "";
+
+        if (signaturePath) {
+          const { data: signatureData, error: signatureError } = await supabase.storage
+            .from("teacher-signatures")
+            .createSignedUrl(signaturePath, 60 * 30);
+          if (signatureError) throw signatureError;
+          resolvedPrincipalSignatureUrl = signatureData.signedUrl;
+        }
+      } catch (principalSettingsError) {
+        console.warn("Unable to load principal details for the report card:", principalSettingsError);
+      }
+    }
+
+    if (classTeacherSignaturePath) {
+      const { data: signatureData, error: signatureError } = await supabase.storage
+        .from("teacher-signatures")
+        .createSignedUrl(classTeacherSignaturePath, 60 * 30);
+      if (signatureError) {
+        console.warn("Unable to load the class teacher signature image:", signatureError);
+      } else {
+        signedClassTeacherSignatureUrl = signatureData.signedUrl;
+      }
+    }
+
+    setClassTeacherSignatureUrl(signedClassTeacherSignatureUrl);
+    setPrincipalName(resolvedPrincipalName);
+    setPrincipalSignatureUrl(resolvedPrincipalSignatureUrl);
     setPrinting(true);
 
     // The printable report is rendered through a portal. Make sure
@@ -1697,10 +2223,20 @@ export default function StudentResults() {
       {printing && selectedStudent
         ? createPortal(
             <PrintableReportCard
-              schoolName={
-                school?.name ??
-                "High Gate International Academy"
-              }
+              schoolName={school?.name ?? "School"}
+              schoolSlug={school?.slug ?? ""}
+              schoolLogoUrl={school?.logo_url ?? null}
+              schoolAddress={school?.address ?? null}
+              schoolCity={school?.city ?? null}
+              schoolCountry={school?.country ?? null}
+              schoolPhone={school?.phone ?? null}
+              schoolEmail={school?.email ?? null}
+              templateKey={resolveConfiguredTemplateKey(
+                databaseReportTemplate?.template_key,
+                school?.name,
+                school?.slug,
+                isNurseryStudent,
+              )}
               student={selectedStudent}
               academicYear={selectedAcademicYear}
               term={selectedTerm}
@@ -1708,6 +2244,16 @@ export default function StudentResults() {
               subjectResults={subjectResults}
               overallAverage={summary.overallAverage}
               overallGrade={summary.overallGrade}
+              reportSchemeId={reportSchemeId}
+              assessmentCategories={reportAssessmentCategories}
+              gradingScale={reportGradingScale}
+              gradingScalesBySchemeId={gradingScalesBySchemeId}
+              schemeMethodsById={schemeMethodsById}
+              calculationMethod={reportCalculationMethod}
+              classTeacherName={classTeacherName}
+              classTeacherSignatureUrl={classTeacherSignatureUrl}
+              principalName={principalName}
+              principalSignatureUrl={principalSignatureUrl}
               nursery={isNurseryStudent}
             />,
             document.body,
@@ -1745,6 +2291,14 @@ function HighGateLogo({
 
 type PrintReportProps = {
   schoolName: string;
+  schoolSlug: string;
+  schoolLogoUrl: string | null;
+  schoolAddress: string | null;
+  schoolCity: string | null;
+  schoolCountry: string | null;
+  schoolPhone: string | null;
+  schoolEmail: string | null;
+  templateKey: ReportCardTemplateKey;
   student: Student;
   academicYear: AcademicYear | null;
   term: Term;
@@ -1752,6 +2306,16 @@ type PrintReportProps = {
   subjectResults: SubjectResult[];
   overallAverage: number | null;
   overallGrade: string;
+  reportSchemeId: string | null;
+  assessmentCategories: AssessmentCategory[];
+  gradingScale: GradingBand[];
+  gradingScalesBySchemeId: Record<string, GradingBand[]>;
+  schemeMethodsById: Record<string, CalculationMethod>;
+  calculationMethod: CalculationMethod | null;
+  classTeacherName: string;
+  classTeacherSignatureUrl: string;
+  principalName: string;
+  principalSignatureUrl: string;
 };
 
 function PrintableReportCard(
@@ -1759,6 +2323,13 @@ function PrintableReportCard(
 ) {
   const {
     schoolName,
+    schoolLogoUrl,
+    schoolAddress,
+    schoolCity,
+    schoolCountry,
+    schoolPhone,
+    schoolEmail,
+    templateKey,
     student,
     academicYear,
     term,
@@ -1766,8 +2337,49 @@ function PrintableReportCard(
     subjectResults,
     overallAverage,
     overallGrade,
+    reportSchemeId,
+    assessmentCategories,
+    gradingScale,
+    gradingScalesBySchemeId,
+    schemeMethodsById,
+    calculationMethod,
+    classTeacherName,
+    classTeacherSignatureUrl,
+    principalName,
+    principalSignatureUrl,
     nursery,
   } = props;
+  const isHighGateNursery = templateKey === "high-gate-nursery-v1";
+  const isHighGatePrimary = templateKey === "high-gate-primary-v1";
+  const pageOrientation = isHighGateNursery ? "portrait" : "landscape";
+
+  if (!isHighGateNursery && !isHighGatePrimary) {
+    return (
+      <div id="schoolos-report-card-print">
+        <style>{getGenericReportPrintStyles(pageOrientation)}</style>
+        <StandardPrintableReport
+          schoolName={schoolName}
+          schoolLogoUrl={schoolLogoUrl}
+          schoolAddress={schoolAddress}
+          schoolCity={schoolCity}
+          schoolCountry={schoolCountry}
+          schoolPhone={schoolPhone}
+          schoolEmail={schoolEmail}
+          student={student}
+          academicYear={academicYear}
+          term={term}
+          className={className}
+          subjectResults={subjectResults}
+          overallAverage={overallAverage}
+          overallGrade={overallGrade}
+          classTeacherName={classTeacherName}
+          classTeacherSignatureUrl={classTeacherSignatureUrl}
+          principalName={principalName}
+          principalSignatureUrl={principalSignatureUrl}
+        />
+      </div>
+    );
+  }
 
   return (
     <div id="schoolos-report-card-print">
@@ -1781,8 +2393,8 @@ function PrintableReportCard(
 
           @media print {
             @page {
-              size: A4 portrait;
-              margin: 7mm;
+              size: A4 ${pageOrientation};
+              margin: ${isHighGateNursery ? "6mm" : "4mm"};
             }
 
             html,
@@ -1790,7 +2402,8 @@ function PrintableReportCard(
               margin: 0 !important;
               padding: 0 !important;
               width: 100% !important;
-              min-height: 100% !important;
+              min-height: 0 !important;
+              height: auto !important;
               background: #fff !important;
             }
 
@@ -1802,14 +2415,30 @@ function PrintableReportCard(
               display: block !important;
               position: static !important;
               width: 100% !important;
-              min-height: 100vh !important;
+              min-height: 0 !important;
+              height: auto !important;
               background: #fff !important;
               color: #111 !important;
             }
 
             #schoolos-report-card-print {
               font-family: "Times New Roman", Times, serif !important;
+              font-size: 11px !important;
+              line-height: 1.25 !important;
+            }
+
+            /* Increase small utility-sized text on the High Gate form only. */
+            .hg-primary-flow .text-\[8\.5px\] {
+              font-size: 10.5px !important;
+              line-height: 1.25 !important;
+            }
+            .hg-primary-flow .text-\[8px\] {
               font-size: 10px !important;
+              line-height: 1.25 !important;
+            }
+            .hg-primary-flow .text-\[7\.5px\] {
+              font-size: 9.5px !important;
+              line-height: 1.25 !important;
             }
 
             #schoolos-report-card-print * {
@@ -1830,8 +2459,8 @@ function PrintableReportCard(
             }
 
             /*
-             * Primary is intentionally one continuous document.
-             * Chrome decides where page 2 begins when page 1 is full.
+             * High Gate Primary is a continuous landscape document.
+             * Chrome paginates overflow and repeats the subject table header.
              */
             .hg-primary-flow {
               width: 100% !important;
@@ -1855,30 +2484,42 @@ function PrintableReportCard(
             .hg-primary-flow .hg-primary-table th,
             .hg-primary-flow .hg-primary-table td {
               border: 1px solid #111 !important;
-              padding: 3px 2px !important;
+              padding: 4px 3px !important;
               vertical-align: middle !important;
             }
 
             .hg-primary-flow .hg-primary-table th {
               background: #c4df91 !important;
-              font-size: 7px !important;
-              line-height: 1.05 !important;
+              font-size: 11px !important;
+              line-height: 1.2 !important;
             }
 
             .hg-primary-flow .hg-primary-table td {
-              font-size: 7px !important;
-              line-height: 1.12 !important;
+              font-size: 10.8px !important;
+              line-height: 1.25 !important;
             }
 
             .hg-primary-flow .hg-primary-comment {
-              font-size: 6.3px !important;
-              line-height: 1.08 !important;
+              font-size: 10px !important;
+              line-height: 1.25 !important;
               overflow-wrap: anywhere !important;
             }
 
             .hg-primary-flow .hg-primary-teacher {
-              font-size: 6.3px !important;
-              line-height: 1.08 !important;
+              font-size: 10px !important;
+              line-height: 1.25 !important;
+            }
+
+            .hg-primary-flow .hg-primary-summary-block {
+              break-inside: avoid !important;
+              page-break-inside: avoid !important;
+            }
+            .hg-primary-flow .hg-primary-summary-block .text-\[7\.5px\],
+            .hg-primary-flow .hg-primary-summary-block .text-\[8px\],
+            .hg-primary-flow .hg-primary-summary-block .text-\[8\.5px\],
+            .hg-primary-flow .hg-primary-summary-block .text-\[9px\] {
+              font-size: 9.5px !important;
+              line-height: 1.25 !important;
             }
           }
         `}
@@ -1891,10 +2532,13 @@ function PrintableReportCard(
           academicYear={academicYear}
           term={term}
           className={className}
+          classTeacherName={classTeacherName}
+          classTeacherSignatureUrl={classTeacherSignatureUrl}
+          principalName={principalName}
+          principalSignatureUrl={principalSignatureUrl}
         />
       ) : (
         <PrimaryPrintableReport
-          schoolName={schoolName}
           student={student}
           academicYear={academicYear}
           term={term}
@@ -1902,12 +2546,249 @@ function PrintableReportCard(
           subjectResults={subjectResults}
           overallAverage={overallAverage}
           overallGrade={overallGrade}
+          reportSchemeId={reportSchemeId}
+          assessmentCategories={assessmentCategories}
+          gradingScale={gradingScale}
+          gradingScalesBySchemeId={gradingScalesBySchemeId}
+          schemeMethodsById={schemeMethodsById}
+          calculationMethod={calculationMethod}
+          classTeacherName={classTeacherName}
+          classTeacherSignatureUrl={classTeacherSignatureUrl}
+          principalName={principalName}
+          principalSignatureUrl={principalSignatureUrl}
         />
             )}
     </div>
   );
 }
 
+
+function getGenericReportPrintStyles(orientation: "portrait" | "landscape") {
+  return `
+    @media screen {
+      #schoolos-report-card-print { display: none !important; }
+    }
+    @media print {
+      @page { size: A4 ${orientation}; margin: 7mm; }
+      html, body {
+        margin: 0 !important; padding: 0 !important; width: 100% !important;
+        min-height: 0 !important; height: auto !important; background: #fff !important;
+      }
+      body > #root { display: none !important; }
+      body > #schoolos-report-card-print {
+        display: block !important; position: static !important;
+        width: 100% !important; min-height: 0 !important; height: auto !important;
+        background: #fff !important; color: #111 !important;
+      }
+      #schoolos-report-card-print {
+        font-family: Arial, Helvetica, sans-serif !important;
+        font-size: 11px !important; color: #111 !important;
+      }
+      #schoolos-report-card-print header h1 { font-size: 20px !important; line-height: 1.2 !important; }
+      #schoolos-report-card-print header h2 { font-size: 16px !important; line-height: 1.2 !important; }
+      #schoolos-report-card-print section { font-size: 11px !important; line-height: 1.35 !important; }
+      #schoolos-report-card-print * {
+        visibility: visible !important; box-shadow: none !important;
+        box-sizing: border-box !important;
+      }
+      .ms-standard-report-table {
+        width: 100% !important; border-collapse: collapse !important;
+        table-layout: fixed !important;
+      }
+      .ms-standard-report-table thead { display: table-header-group !important; }
+      .ms-standard-report-table tr {
+        break-inside: avoid !important; page-break-inside: avoid !important;
+      }
+      .ms-standard-report-table th, .ms-standard-report-table td {
+        border: 1px solid #333 !important; padding: 5px !important;
+        vertical-align: top !important; overflow-wrap: anywhere !important;
+        font-size: 12px !important; line-height: 1.3 !important;
+      }
+      .ms-standard-report-table th {
+        background: #e9eef5 !important; font-weight: 700 !important; font-size: 12.5px !important;
+      }
+      .ms-standard-footer-block { font-size: 12px !important; line-height: 1.4 !important; }
+      .ms-standard-footer-block { break-inside: avoid !important; page-break-inside: avoid !important; }
+    }
+  `;
+}
+
+type StandardPrintableReportProps = Omit<
+  PrintReportProps,
+  | "schoolSlug"
+  | "templateKey"
+  | "reportSchemeId"
+  | "assessmentCategories"
+  | "gradingScale"
+  | "gradingScalesBySchemeId"
+  | "schemeMethodsById"
+  | "calculationMethod"
+>;
+
+function StandardPrintableReport({
+  schoolName,
+  schoolLogoUrl,
+  schoolAddress,
+  schoolCity,
+  schoolCountry,
+  schoolPhone,
+  schoolEmail,
+  student,
+  academicYear,
+  term,
+  className,
+  subjectResults,
+  overallAverage,
+  classTeacherName,
+  classTeacherSignatureUrl,
+  principalName,
+  principalSignatureUrl,
+}: StandardPrintableReportProps) {
+  return (
+    <div className="mx-auto w-full bg-white px-1 py-1 text-slate-900">
+      <header className="mb-4 flex items-center justify-between gap-4 border-b-2 border-slate-800 pb-3">
+        <div className="flex min-w-0 items-center gap-3">
+          {schoolLogoUrl ? (
+            <img
+              src={schoolLogoUrl}
+              alt={`${schoolName} logo`}
+              loading="eager"
+              decoding="sync"
+              className="max-h-20 max-w-24 object-contain"
+            />
+          ) : null}
+          <div className="min-w-0">
+            <h1 className="text-lg font-bold">{schoolName}</h1>
+            {[schoolAddress, [schoolCity, schoolCountry].filter(Boolean).join(", ")]
+              .filter(Boolean)
+              .map((line) => (
+                <p key={line} className="mt-0.5 text-[11px] text-slate-600">{line}</p>
+              ))}
+            {[schoolPhone, schoolEmail].filter(Boolean).length > 0 ? (
+              <p className="mt-0.5 text-[11px] text-slate-600">
+                {[schoolPhone, schoolEmail].filter(Boolean).join(" · ")}
+              </p>
+            ) : null}
+          </div>
+        </div>
+        <div className="shrink-0 text-right">
+          <h2 className="text-base font-bold">STUDENT TERM REPORT</h2>
+          <p className="mt-1 text-[11px]">{academicYear?.name ?? "—"} · {term}</p>
+        </div>
+      </header>
+
+      <section className="mb-3 grid grid-cols-2 gap-x-8 gap-y-2 text-[11px]">
+        <p><strong>Student:</strong> {student.name}</p>
+        <p><strong>Class:</strong> {className || "—"}</p>
+        <p><strong>Registration number:</strong> {student.studentId}</p>
+        <p><strong>Academic year:</strong> {academicYear?.name ?? "—"}</p>
+      </section>
+
+      <table className="ms-standard-report-table">
+        <colgroup>
+          <col style={{ width: "18%" }} />
+          <col style={{ width: "34%" }} />
+          <col style={{ width: "10%" }} />
+          <col style={{ width: "10%" }} />
+          <col style={{ width: "28%" }} />
+        </colgroup>
+        <thead>
+          <tr>
+            <th>Subject</th>
+            <th>Assessment results</th>
+            <th>Average</th>
+            <th>Teacher</th>
+            <th>Teacher comments</th>
+          </tr>
+        </thead>
+        <tbody>
+          {subjectResults.length === 0 ? (
+            <tr>
+              <td colSpan={5} className="py-8 text-center">
+                No published assessment results are available for this term.
+              </td>
+            </tr>
+          ) : subjectResults.map((subject) => {
+            const comment = subject.assessments.find((assessment) => assessment.remarks?.trim())?.remarks ?? "";
+            return (
+              <tr key={subject.subjectId}>
+                <td className="font-semibold">{subject.subjectName}</td>
+                <td>
+                  {subject.assessments.map((assessment) => (
+                    <span key={assessment.id} className="mr-2 inline-block">
+                      {assessment.type}: {assessment.marks ?? "—"}/{assessment.maxMarks}
+                    </span>
+                  ))}
+                </td>
+                <td>
+                  {subject.average === null ? "—" : `${subject.average.toFixed(1)}%`}
+                </td>
+                <td>{subject.teacherName || "—"}</td>
+                <td>{comment || "—"}</td>
+              </tr>
+            );
+          })}
+          {subjectResults.length > 0 ? (
+            <tr>
+              <td colSpan={2} className="font-bold">Overall average</td>
+              <td colSpan={3} className="font-bold">
+                {overallAverage === null ? "—" : `${overallAverage.toFixed(2)}%`}
+              </td>
+            </tr>
+          ) : null}
+        </tbody>
+      </table>
+
+      <div className="ms-standard-footer-block mt-5 grid grid-cols-2 gap-8 text-[11px]">
+        <div>
+          <div className="mb-2 font-semibold">Class teacher</div>
+          <div className="mb-1 font-semibold">{classTeacherName || "________________"}</div>
+          <div className="mb-1 flex h-10 items-end">
+            {classTeacherSignatureUrl ? (
+              <img src={classTeacherSignatureUrl} alt="Class teacher signature" className="max-h-10 max-w-40 object-contain object-left-bottom" />
+            ) : null}
+          </div>
+          <div className="border-b border-slate-500 pb-1">Signature / Date: __________________</div>
+        </div>
+        <div>
+          <div className="mb-1 font-semibold">Principal</div>
+          <div className="mb-1 font-semibold">{principalName || "________________"}</div>
+          <div className="mb-1 flex h-10 items-end">
+            {principalSignatureUrl ? (
+              <img src={principalSignatureUrl} alt="Principal signature" className="max-h-10 max-w-40 object-contain object-left-bottom" />
+            ) : null}
+          </div>
+          <div className="border-b border-slate-500 pb-1">Signature</div>
+          <div className="mt-1">Date: __________________</div>
+        </div>
+      </div>
+      <p className="mt-4 text-center text-[10px] text-slate-500">
+        This is the standard MojaSchool report template. A school-specific report design can be configured when provided by the school.
+      </p>
+    </div>
+  );
+}
+
+type PrimaryPrintableReportProps = Pick<
+  PrintReportProps,
+  | "student"
+  | "academicYear"
+  | "term"
+  | "className"
+  | "subjectResults"
+  | "overallAverage"
+  | "overallGrade"
+  | "reportSchemeId"
+  | "assessmentCategories"
+  | "gradingScale"
+  | "gradingScalesBySchemeId"
+  | "schemeMethodsById"
+  | "calculationMethod"
+  | "classTeacherName"
+  | "classTeacherSignatureUrl"
+  | "principalName"
+  | "principalSignatureUrl"
+>;
 
 function PrimaryPrintableReport({
   student,
@@ -1916,52 +2797,102 @@ function PrimaryPrintableReport({
   className,
   subjectResults,
   overallAverage,
-}: PrintReportProps) {
-  const columns = [
-    { label: "CAT I", type: "CAT I", max: "/40" },
-    { label: "CAT II", type: "CAT II", max: "/40" },
-    { label: "C.P", type: "C.P", max: "/10" },
-    { label: "HW&Pr", type: "HW&Pr", max: "/10" },
-    { label: "Exam", type: "Exam", max: "/100" },
+  reportSchemeId,
+  assessmentCategories,
+  gradingScale,
+  gradingScalesBySchemeId,
+  schemeMethodsById,
+  calculationMethod,
+  classTeacherName,
+  classTeacherSignatureUrl,
+  principalName,
+  principalSignatureUrl,
+}: PrimaryPrintableReportProps) {
+  const fallbackColumns = [
+    { categoryId: null, categoryKey: "cat_i", label: "CAT I", maxMarks: 40, fallbackType: "CAT I" },
+    { categoryId: null, categoryKey: "cat_ii", label: "CAT II", maxMarks: 40, fallbackType: "CAT II" },
+    { categoryId: null, categoryKey: "class_participation", label: "C.P", maxMarks: 10, fallbackType: "C.P" },
+    { categoryId: null, categoryKey: "homework_projects", label: "HW&Pr", maxMarks: 10, fallbackType: "HW&Pr" },
+    { categoryId: null, categoryKey: "exam", label: "Exam", maxMarks: 100, fallbackType: "Exam" },
   ];
+  // The installed High Gate template keeps its familiar table format, but the
+  // actual category labels/maxima come from the configured scheme version.
+  const configuredColumns = assessmentCategories
+    .filter((category) => category.enabled && (!reportSchemeId || category.scheme_id === reportSchemeId))
+    .sort((left, right) => left.display_order - right.display_order)
+    .map((category) => ({
+      categoryId: category.id,
+      categoryKey: category.category_key,
+      label: category.label,
+      maxMarks: Number(category.max_marks),
+      fallbackType: category.label,
+    }));
+  const columns = configuredColumns.length > 0 ? configuredColumns : fallbackColumns;
 
   const getMark = (
     subject: SubjectResult,
-    type: string,
+    column: (typeof columns)[number],
   ): number | null => {
-    return (
-      subject.assessments.find(
-        (assessment) => assessment.type === type,
-      )?.marks ?? null
-    );
+    const match = subject.assessments.find((assessment) => {
+      if (column.categoryId && assessment.categoryId === column.categoryId) return true;
+      return normalizedAssessmentKey(assessment.categoryKey) === normalizedAssessmentKey(column.categoryKey) ||
+        normalizedAssessmentKey(assessment.type) === normalizedAssessmentKey(column.label) ||
+        normalizedAssessmentKey(assessment.type) === normalizedAssessmentKey(column.fallbackType);
+    });
+    return match?.marks ?? null;
   };
 
-  const getTotal = (
-    subject: SubjectResult,
-  ): number | null => {
-    const catI = getMark(subject, "CAT I");
-    const catII = getMark(subject, "CAT II");
-    const cp = getMark(subject, "C.P");
-    const hw = getMark(subject, "HW&Pr");
-    const exam = getMark(subject, "Exam");
+  const getSubjectSchemeId = (subject: SubjectResult): string | null => {
+    const ids = Array.from(new Set(subject.assessments.map((item) => item.schemeId).filter((id): id is string => Boolean(id))));
+    if (ids.length === 1) return ids[0];
+    if (ids.length === 0) return reportSchemeId;
+    return null;
+  };
 
-    if (
-      catI !== null &&
-      catII !== null &&
-      cp !== null &&
-      hw !== null &&
-      exam !== null
-    ) {
-      return (
-        Number(catI) +
-        Number(catII) +
-        Number(cp) +
-        Number(hw) +
-        Number(exam)
-      ) / 2;
+  const getSubjectGradingScale = (subject: SubjectResult): GradingBand[] => {
+    const schemeId = getSubjectSchemeId(subject);
+    return schemeId ? (gradingScalesBySchemeId[schemeId] ?? gradingScale) : gradingScale;
+  };
+
+  const getTotal = (subject: SubjectResult): number | null => {
+    const subjectSchemeIds = Array.from(new Set(subject.assessments.map((item) => item.schemeId).filter((id): id is string => Boolean(id))));
+    if (subjectSchemeIds.length > 1) return subject.average;
+    const schemeId = getSubjectSchemeId(subject);
+    const subjectCalculationMethod = schemeId
+      ? schemeMethodsById[schemeId] ?? calculationMethod
+      : calculationMethod;
+    if (subjectCalculationMethod !== "total_to_percentage") return subject.average;
+
+    const categoriesForSubject = assessmentCategories.filter((category) =>
+      category.enabled && category.contributes_to_total && (!schemeId || category.scheme_id === schemeId),
+    );
+    if (categoriesForSubject.length === 0) return subject.average;
+    const hasMissingRequired = categoriesForSubject.some((category) =>
+      category.is_required && !subject.assessments.some((assessment) => {
+        if (assessment.marks === null) return false;
+        if (assessment.categoryId) return assessment.categoryId === category.id;
+        return assessment.categoryKey === category.category_key ||
+          normalizedAssessmentKey(assessment.type) === normalizedAssessmentKey(category.label) ||
+          normalizedAssessmentKey(assessment.type) === normalizedAssessmentKey(category.category_key);
+      }),
+    );
+    if (hasMissingRequired) return null;
+
+    let earnedEquivalent = 0;
+    let possibleEquivalent = 0;
+    for (const category of categoriesForSubject) {
+      const matching = subject.assessments.filter((assessment) => {
+        if (assessment.categoryId) return assessment.categoryId === category.id;
+        return assessment.categoryKey === category.category_key ||
+          normalizedAssessmentKey(assessment.type) === normalizedAssessmentKey(category.label) ||
+          normalizedAssessmentKey(assessment.type) === normalizedAssessmentKey(category.category_key);
+      }).filter((assessment) => assessment.marks !== null);
+      if (matching.length === 0) continue;
+      const percentage = matching.reduce((total, item) => total + Number(item.percentage ?? 0), 0) / matching.length;
+      earnedEquivalent += (percentage / 100) * Number(category.max_marks);
+      possibleEquivalent += Number(category.max_marks);
     }
-
-    return subject.average;
+    return possibleEquivalent > 0 ? (earnedEquivalent / possibleEquivalent) * 100 : subject.average;
   };
 
   return (
@@ -2037,15 +2968,11 @@ function PrimaryPrintableReport({
       <table className="hg-primary-table mt-3">
         <colgroup>
           <col style={{ width: "15%" }} />
-          <col style={{ width: "5%" }} />
-          <col style={{ width: "5%" }} />
-          <col style={{ width: "4%" }} />
-          <col style={{ width: "5%" }} />
-          <col style={{ width: "5%" }} />
-          <col style={{ width: "5%" }} />
-          <col style={{ width: "4%" }} />
-          <col style={{ width: "4%" }} />
-          <col style={{ width: "38%" }} />
+          {columns.map((column) => <col key={column.categoryId ?? column.categoryKey} style={{ width: `${40 / (columns.length + 3)}%` }} />)}
+          <col style={{ width: `${40 / (columns.length + 3)}%` }} />
+          <col style={{ width: `${40 / (columns.length + 3)}%` }} />
+          <col style={{ width: `${40 / (columns.length + 3)}%` }} />
+          <col style={{ width: "35%" }} />
           <col style={{ width: "10%" }} />
         </colgroup>
 
@@ -2054,14 +2981,9 @@ function PrimaryPrintableReport({
             <th>SUBJECT</th>
 
             {columns.map((column) => (
-              <th
-                key={column.label}
-                className="text-center"
-              >
+              <th key={column.categoryId ?? column.categoryKey} className="text-center">
                 <div>{column.label}</div>
-                <div className="font-normal">
-                  {column.max}
-                </div>
+                <div className="font-normal">/{column.maxMarks}</div>
               </th>
             ))}
 
@@ -2089,7 +3011,7 @@ function PrimaryPrintableReport({
           {subjectResults.length === 0 ? (
             <tr>
               <td
-                colSpan={11}
+                colSpan={columns.length + 6}
                 className="py-8 text-center"
               >
                 No assessment results available.
@@ -2115,14 +3037,8 @@ function PrimaryPrintableReport({
                   </td>
 
                   {columns.map((column) => (
-                    <td
-                      key={column.label}
-                      className="text-center"
-                    >
-                      {getMark(
-                        subject,
-                        column.type,
-                      ) ?? ""}
+                    <td key={column.categoryId ?? column.categoryKey} className="text-center">
+                      {getMark(subject, column) ?? ""}
                     </td>
                   ))}
 
@@ -2133,14 +3049,12 @@ function PrimaryPrintableReport({
                   </td>
 
                   <td className="text-center font-bold">
-                    {getGrade(total)}
+                    {getConfiguredGrade(total, getSubjectGradingScale(subject))}
                   </td>
 
                   <td className="text-center">
-                    {subject.average !== null
-                      ? Math.round(
-                          subject.average,
-                        )
+                    {subject.classAverage !== null
+                      ? Math.round(subject.classAverage)
                       : ""}
                   </td>
 
@@ -2158,41 +3072,36 @@ function PrimaryPrintableReport({
 
           {subjectResults.length > 0 && (
             <tr className="hg-green">
+              <td className="font-bold italic">AVERAGE</td>
               <td
-                colSpan={9}
-                className="text-right font-bold"
-              >
-                AVERAGE
-              </td>
-
-              <td
-                colSpan={3}
+                colSpan={columns.length + 1}
                 className="text-center font-bold"
               >
                 {overallAverage !== null
-                  ? overallAverage.toFixed(2)
+                  ? `${overallAverage.toFixed(2)}%`
                   : "—"}
               </td>
+              <td colSpan={4} />
             </tr>
           )}
         </tbody>
       </table>
 
-      <div className="mt-2 text-[8.5px] font-bold">
-        Conduct : 40/40
+      <div className="hg-primary-summary-block mt-2 text-[8.5px] font-bold">
+        Conduct : _____ / 40
       </div>
 
-      <div className="mt-2 border-2 border-black">
+      <div className="hg-primary-summary-block mt-2 border-2 border-black">
         <div className="bg-slate-100 px-2 py-1 text-center text-[9px] font-bold">
           General Comment
         </div>
 
-        <div className="min-h-[90px] px-4 py-4 text-[8.5px]">
+        <div className="min-h-[60px] px-4 py-3 text-[8.5px]">
           &nbsp;
         </div>
       </div>
 
-      <div className="mt-3 text-[7.5px] leading-3">
+      <div className="hg-primary-summary-block mt-3 text-[7.5px] leading-3">
         <div className="font-bold">
           ABBREVIATIONS
         </div>
@@ -2232,7 +3141,7 @@ function PrimaryPrintableReport({
         </div>
       </div>
 
-      <div className="mt-3">
+      <div className="hg-primary-summary-block mt-3">
         <div className="font-bold text-[8.5px]">
           Grading Scale
         </div>
@@ -2240,25 +3149,18 @@ function PrimaryPrintableReport({
         <table className="hg-primary-table mt-1 text-[7.5px]">
           <tbody>
             <tr>
-              {[
-                ["90-100", "A*"],
-                ["80-89", "A"],
-                ["70-79", "B"],
-                ["60-69", "C"],
-                ["50-59", "D"],
-                ["40-49", "E"],
-                ["30-39", "F"],
-                ["20-29", "G"],
-                ["0-19", "U"],
-              ].map(([range, grade]) => (
-                <td
-                  key={grade}
-                  className="py-1 text-center"
-                >
+              {(gradingScale.length > 0
+                ? [...gradingScale]
+                    .sort((a, b) => Number(b.min_percentage) - Number(a.min_percentage))
+                    .map((band) => [
+                      `${Math.ceil(Number(band.min_percentage))}-${Math.floor(Number(band.max_percentage))}`,
+                      band.grade,
+                    ] as [string, string])
+                : [["90-100", "A*"], ["80-89", "A"], ["70-79", "B"], ["60-69", "C"], ["50-59", "D"], ["40-49", "E"], ["30-39", "F"], ["20-29", "G"], ["0-19", "U"]] as [string, string][]
+              ).map(([range, grade]) => (
+                <td key={grade} className="py-1 text-center">
                   <div>{range}</div>
-                  <div className="font-bold">
-                    {grade}
-                  </div>
+                  <div className="font-bold">{grade}</div>
                 </td>
               ))}
             </tr>
@@ -2266,35 +3168,40 @@ function PrimaryPrintableReport({
         </table>
       </div>
 
-      <div className="mt-8 grid grid-cols-2 gap-20 text-[9px]">
+      <div className="hg-primary-summary-block mt-4 grid grid-cols-2 gap-20 text-[9px]">
         <div>
           <div className="font-semibold">
             Class Teacher
           </div>
 
           <div className="mt-1 font-semibold">
-            {subjectResults.find(
-              (subject) => subject.teacherName,
-            )?.teacherName || "________________"}
+            {classTeacherName || "________________"}
           </div>
-
-          <div className="mt-8 border-t border-black pt-1">
+          <div className="mt-1 flex h-10 items-end">
+            {classTeacherSignatureUrl ? (
+              <img src={classTeacherSignatureUrl} alt="Class teacher signature" className="max-h-10 max-w-40 object-contain object-left-bottom" />
+            ) : null}
+          </div>
+          <div className="mt-1 border-t border-black pt-1">
             Signature
           </div>
         </div>
 
         <div>
-          <div className="font-semibold">
-            Principal
+          <div className="font-semibold">Principal</div>
+          <div className="mt-1 min-h-4 font-semibold">
+            {principalName || "________________"}
           </div>
-
-          <div className="mt-9 border-t border-black pt-1">
-            Signature
+          <div className="mt-1 flex h-10 items-end">
+            {principalSignatureUrl ? (
+              <img src={principalSignatureUrl} alt="Principal signature" className="max-h-10 max-w-40 object-contain object-left-bottom" />
+            ) : null}
           </div>
+          <div className="mt-1 border-t border-black pt-1">Signature</div>
         </div>
       </div>
 
-      <div className="mt-10 flex justify-center">
+      <div className="hg-primary-summary-block mt-5 flex justify-center">
         <div className="text-center text-[8px]">
           <div className="font-bold">
             Cambridge Assessment
@@ -2308,7 +3215,7 @@ function PrimaryPrintableReport({
         </div>
       </div>
 
-      <div className="mt-8 text-center text-[6.5px]">
+      <div className="mt-3 text-center text-[8px]">
         School Contacts: Website: www.highgateinternational.com /
         Email: info@highgateinternational.com / Phone number: + 250 79 89 80 340 /
         Report made using www.academicbridge.xyz
@@ -2322,12 +3229,20 @@ function NurseryPrintableReport({
   academicYear,
   term,
   className,
+  classTeacherName,
+  classTeacherSignatureUrl,
+  principalName,
+  principalSignatureUrl,
 }: {
   schoolName: string;
   student: Student;
   academicYear: AcademicYear | null;
   term: Term;
   className: string;
+  classTeacherName: string;
+  classTeacherSignatureUrl: string;
+  principalName: string;
+  principalSignatureUrl: string;
 }) {
   const pages = [
     [
@@ -2588,20 +3503,26 @@ function NurseryPrintableReport({
             <div className="bg-[#C6D8E5] px-3 py-2">
               Directeur de l'école :
             </div>
-
-            <div className="mt-3 border-b border-slate-400 pb-2">
-              Signature:
+            <div className="mt-2 min-h-5 font-semibold">{principalName || "________________"}</div>
+            <div className="mt-1 flex h-10 items-end">
+              {principalSignatureUrl ? (
+                <img src={principalSignatureUrl} alt="Signature du directeur" className="max-h-10 max-w-40 object-contain object-left-bottom" />
+              ) : null}
             </div>
+            <div className="mt-1 border-b border-slate-400 pb-2">Signature:</div>
           </div>
 
           <div>
             <div className="bg-[#C6D8E5] px-3 py-2">
               Enseignante :
             </div>
-
-            <div className="mt-3 border-b border-slate-400 pb-2">
-              Signature:
+            <div className="mt-2 min-h-5 font-semibold">{classTeacherName || "________________"}</div>
+            <div className="mt-1 flex h-10 items-end">
+              {classTeacherSignatureUrl ? (
+                <img src={classTeacherSignatureUrl} alt="Class teacher signature" className="max-h-10 max-w-40 object-contain object-left-bottom" />
+              ) : null}
             </div>
+            <div className="mt-1 border-b border-slate-400 pb-2">Signature:</div>
           </div>
         </div>
 
