@@ -74,6 +74,7 @@ export default function App() {
       ===================================================== */}
 
       <Route path="/login" element={<Login />} />
+      <Route path="/reset-password" element={<Login />} />
       <Route path="/signup" element={<SignUp />} />
 
       {/* Invitation links must remain public so an invited user
