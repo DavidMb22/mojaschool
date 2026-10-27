@@ -43,30 +43,53 @@ export default function Login() {
 
     let mounted = true;
 
+    // Supabase recovery links may deliver their parameters in the URL hash
+    // (implicit flow) or query string. Detect the recovery link immediately so
+    // the password form is visible even before the auth event is emitted.
+    const searchParams = new URLSearchParams(window.location.search);
+    const hashParams = new URLSearchParams(
+      window.location.hash.replace(/^#/, ""),
+    );
+    const isRecoveryCallback =
+      searchParams.get("type") === "recovery" ||
+      hashParams.get("type") === "recovery";
+
+    const callbackError =
+      searchParams.get("error_description") ||
+      hashParams.get("error_description");
+
+    if (callbackError) {
+      setMode("signIn");
+      setError(decodeURIComponent(callbackError.replace(/\+/g, " ")));
+    } else if (isRecoveryCallback) {
+      setMode("reset");
+      setError("");
+      setSuccess("");
+      setPassword("");
+      setConfirmPassword("");
+    }
+
     async function resolveInvitationCallback() {
       const rawSearch = window.location.search;
       const rawHash = window.location.hash;
-      const searchParams = new URLSearchParams(rawSearch);
-      const hashParams = new URLSearchParams(rawHash.replace(/^#/, ""));
+      const currentSearchParams = new URLSearchParams(rawSearch);
+      const currentHashParams = new URLSearchParams(rawHash.replace(/^#/, ""));
 
       let pendingInvitation = false;
-
       try {
         pendingInvitation =
-          window.sessionStorage.getItem("schoolos.invitation.pending") ===
-          "true";
+          window.sessionStorage.getItem("schoolos.invitation.pending") === "true";
       } catch {
         pendingInvitation = false;
       }
 
       const hasInvitationUrl =
-        searchParams.has("confirmation_url") ||
-        searchParams.get("type") === "invite" ||
-        searchParams.has("token_hash") ||
-        hashParams.get("type") === "invite";
+        currentSearchParams.has("confirmation_url") ||
+        currentSearchParams.get("type") === "invite" ||
+        currentSearchParams.has("token_hash") ||
+        currentHashParams.get("type") === "invite";
 
       let hasRecoveredInvitationSession = false;
-
       if (pendingInvitation && !hasInvitationUrl) {
         const { data } = await supabase.auth.getSession();
         hasRecoveredInvitationSession = Boolean(data.session);
@@ -76,9 +99,6 @@ export default function Login() {
         return;
       }
 
-      // Supabase can sometimes return an invitation callback to /login after
-      // processing the confirmation URL. Never render the normal sign-in form
-      // for that callback. Send it back to the dedicated invitation flow.
       const target = `/accept-invitation${rawSearch}${rawHash}`;
       navigate(target, { replace: true });
     }
@@ -94,12 +114,6 @@ export default function Login() {
         setSuccess("");
         setPassword("");
         setConfirmPassword("");
-
-        window.history.replaceState(
-          {},
-          document.title,
-          window.location.pathname,
-        );
       }
     });
 
@@ -167,6 +181,16 @@ export default function Login() {
 
         if (password !== confirmPassword) {
           setError("The passwords do not match.");
+          return;
+        }
+
+        const { data: sessionData, error: sessionError } =
+          await supabase.auth.getSession();
+
+        if (sessionError || !sessionData.session) {
+          setError(
+            "This password reset link is invalid or has expired. Please request a new reset link and open it on this device.",
+          );
           return;
         }
 
